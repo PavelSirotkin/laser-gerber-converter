@@ -843,9 +843,9 @@ class LaserConverterApp(QtWidgets.QWidget):
             spin_y.installEventFilter(self)
             grid.addWidget(spin_y, 1, 1)
 
-            # Ваша автоматическая подстановка для тестирования (+10 мм)
-            spin_x.setValue(scene_x + 10)
-            spin_y.setValue(-scene_y + 10)
+            # Подставляем координаты прицела как стартовое значение
+            spin_x.setValue(scene_x)
+            spin_y.setValue(-scene_y)
 
             # Чекбокс автоматического добавления смещения камеры
             cb_add_cam = QtWidgets.QCheckBox("Учитывать смещение камеры при вводе")
@@ -867,7 +867,7 @@ class LaserConverterApp(QtWidgets.QWidget):
                     mach_x += cam_x
                     mach_y += cam_y
 
-                self.manual_mach_pts[point_idx] = (mach_x, mach_y)
+                self.manual_mach_pts[point_idx] = (mach_x, mach_y, cb_add_cam.isChecked())
                 
                 cam_label = " (+Камера)" if cb_add_cam.isChecked() else ""
                 buttons[point_idx].setText(f"Т{point_idx + 1}: Сетка({scene_x:.4f}, {-scene_y:.4f}) -> Ст({mach_x:.4f}, {mach_y:.4f}){cam_label}")
