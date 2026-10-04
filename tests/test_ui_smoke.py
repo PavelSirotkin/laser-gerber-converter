@@ -76,3 +76,23 @@ def test_crosshair_reaches_board_corners(qapp, zoom):
         cx, cy = w.view.get_center_board_coordinates()
         assert (cx, -cy) == pytest.approx((x, y), abs=2 * pixel_mm)
     w.close()
+
+
+def test_corrupt_calibration_in_ini_is_ignored(qapp, tmp_path):
+    """Вырожденная матрица в INI (например, после неудачной калибровки) не ломает загрузку платы"""
+    from PyQt6 import QtCore
+
+    from ui.main_window import LaserConverterApp
+
+    ini = QtCore.QSettings(os.path.expanduser("~/.LaserConverterApp.ini"), QtCore.QSettings.Format.IniFormat)
+    ini.setValue("calib_matrix_active", "true")
+    for key, value in dict(mat_m11=0.0, mat_m21=0.0, mat_m12=0.0, mat_m22=0.0, mat_dx=1.0, mat_dy=1.0).items():
+        ini.setValue(key, value)
+    ini.sync()
+
+    w = LaserConverterApp()
+    assert not w.use_calibration
+    w.load_gerber_geometry(os.path.join(SAMPLES, "test.gbr"))
+    assert w.geo_context is not None
+    assert "Ошибка" not in w.status_label.text()
+    w.close()

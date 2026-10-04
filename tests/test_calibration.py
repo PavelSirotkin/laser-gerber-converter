@@ -3,7 +3,7 @@ import math
 import pytest
 from conftest import CALIB
 
-from core.calibration import CalibrationError, fit_affine
+from core.calibration import CalibrationError, decompose_affine, describe_affine, fit_affine
 from core.geometry import GerberGeometryContext
 
 
@@ -81,3 +81,18 @@ def test_display_to_local_rejects_singular_matrix():
     ctx.matrix_coeffs = (1, 2, 2, 4, 0, 0)
     with pytest.raises(ValueError):
         ctx.display_to_local(1, 1)
+
+
+def test_decompose_affine_reports_rotation_scale_and_shift():
+    d = decompose_affine(CALIB)  # поворот 3°, масштаб 1.002, сдвиг (12.5, 7.25)
+    assert d["angle"] == pytest.approx(3.0)
+    assert d["scale_x"] == pytest.approx(1.002) and d["scale_y"] == pytest.approx(1.002)
+    assert d["skew"] == pytest.approx(0.0, abs=1e-9)
+    assert (d["dx"], d["dy"]) == (12.5, 7.25)
+    assert not d["mirrored"]
+    assert "Поворот +3.000°" in describe_affine(CALIB)
+
+
+def test_decompose_affine_detects_mirror_and_skew():
+    assert decompose_affine((-1, 0, 0, 1, 0, 0))["mirrored"]
+    assert decompose_affine((1, 0.1, 0, 1, 0, 0))["skew"] == pytest.approx(5.71, abs=0.01)

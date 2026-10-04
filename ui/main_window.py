@@ -1,11 +1,12 @@
 """Главное окно конвертера: параметры станка, калибровка по точкам, превью и сохранение G-кода."""
 
+import math
 import os
 import traceback
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from core.calibration import CalibrationError, fit_affine
+from core.calibration import CalibrationError, describe_affine, fit_affine
 from core.gcode import GcodeParams, generate_gcode
 from core.geometry import GerberGeometryContext
 from core.gerber import load_gerber
@@ -205,6 +206,12 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.calib_layout.addWidget(self.btn_pt2)
         self.calib_layout.addWidget(self.btn_pt3)
         self.calib_layout.addWidget(self.btn_pt4)
+
+        # Что вычислила калибровка: поворот, масштаб, перекос, сдвиг
+        self.calib_info_label = QtWidgets.QLabel()
+        self.calib_info_label.setWordWrap(True)
+        self.calib_info_label.setStyleSheet("color: #2e7d32;")
+        self.calib_layout.addWidget(self.calib_info_label)
         self.left_layout.addWidget(self.calib_group)
         self.calib_group.setVisible(False)
 
@@ -343,8 +350,14 @@ class LaserConverterApp(QtWidgets.QWidget):
                     dx = float(self.settings.value("mat_dx", 0.0))
                     dy = float(self.settings.value("mat_dy", 0.0))
 
-                    self.matrix_coeffs = (m11, m21, m12, m22, dx, dy)
+                    coeffs = (m11, m21, m12, m22, dx, dy)
+                    if not all(math.isfinite(v) for v in coeffs) or abs(m11 * m22 - m21 * m12) < 1e-9:
+                        raise ValueError(f"матрица вырождена или содержит NaN: {coeffs}")
+                    self.matrix_coeffs = coeffs
                     self.use_calibration = True
+                    self.calib_info_label.setText(
+                        f"Калибровка из прошлого сеанса: {describe_affine(self.matrix_coeffs)}"
+                    )
 
                     buttons = [self.btn_pt1, self.btn_pt2, self.btn_pt3, self.btn_pt4]
                     for idx in range(4):
@@ -459,6 +472,7 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.use_calibration = False
             self.manual_file_pts = [None, None, None, None]
             self.manual_mach_pts = [None, None, None, None]
+            self.calib_info_label.setText("")
             self.redraw_calibration_markers()
 
             if hasattr(self, "btn_pt1"):
@@ -509,9 +523,11 @@ class LaserConverterApp(QtWidgets.QWidget):
         scene_x, scene_y = self.view.get_center_board_coordinates()
 
         # Считываем смещение камеры из интерфейса
-        is_camera_active = hasattr(self, "cb_use_camera_offset") and self.cb_use_camera_offset.isChecked()
-        cam_x = self.spin_cam_offset_x.value() if (is_camera_active and hasattr(self, "spin_cam_offset_x")) else 0.0
-        cam_y = self.spin_cam_offset_y.value() if (is_camera_active and hasattr(self, "spin_cam_offset_y")) else 0.0
+        # Галочка «Учитывать смещение камеры» в окне ввода добавляет смещение всегда;
+        # компенсация смещения в основном окне задает только ее начальное состояние
+        is_camera_active = self.cb_use_camera_offset.isChecked()
+        cam_x = self.spin_cam_offset_x.value()
+        cam_y = self.spin_cam_offset_y.value()
 
         # Локальные координаты точки на плате для МНК. Экран может показывать плату как со
         # смещением камеры, так и уже с примененной калибровкой — снимаем ровно то, что на экране.
@@ -564,7 +580,7 @@ class LaserConverterApp(QtWidgets.QWidget):
             spin_y.setValue(-scene_y)
 
             # Чекбокс автоматического добавления смещения камеры
-            cb_add_cam = QtWidgets.QCheckBox("Учитывать смещение камеры при вводе")
+            cb_add_cam = QtWidgets.QCheckBox(f"Учитывать смещение камеры при вводе ({cam_x:+.4f}, {cam_y:+.4f} мм)")
             cb_add_cam.setChecked(is_camera_active)
             dialog_layout.addWidget(cb_add_cam)
 
@@ -682,14 +698,22 @@ class LaserConverterApp(QtWidgets.QWidget):
                 return
             m11, m21, m12, m22, dx, dy = coeffs
 
+            # Точка платы под прицелом до смены системы координат экрана
+            self.sync_geometry_context()
+            center_x, center_y = self.view.get_center_board_coordinates()
+            local_center = self.geo_context.display_to_local(center_x, -center_y)
+
             self.matrix_coeffs = coeffs
             self.use_calibration = True
 
             pts_count = len(valid_indices)
-            self.status_label.setText(f"Статус: Базирование выполнено успешно по {pts_count} точкам!")
-            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.calib_info_label.setText(f"Базирование по {pts_count} точкам: {describe_affine(coeffs)}")
 
             self.update_interactive_preview()
+
+            # Экран теперь в координатах станка — рисунок переехал. Возвращаем ту же точку платы под прицел
+            new_x, new_y = self.geo_context.local_to_display(*local_center)
+            self.view.centerOn(new_x, -new_y)
 
             # АВТОСОХРАНЕНИЕ КАЛИБРОВКИ В INI:
             self.settings.setValue("calib_matrix_active", "true")

@@ -17,9 +17,12 @@ def qapp():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-# Укладка 99: два из трех реперов в мертвой зоне камеры — их наводят лазером
+# Укладка 99: два из трех реперов в мертвой зоне камеры — их наводят лазером.
+# main_camera — галочка «Включить компенсацию смещения камеры» в основном окне: при наведении камерой
+# смещение должно учитываться и без нее (раньше не учитывалось — плата уезжала на величину смещения)
+@pytest.mark.parametrize("main_camera", [True, False])
 @pytest.mark.parametrize("seed", [5, 99])
-def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, seed):
+def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, seed, main_camera):
     from ui.main_window import LaserConverterApp
     from ui.simulator_window import SimulatorWindow
 
@@ -28,7 +31,7 @@ def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, seed):
 
     sim = SimulatorWindow(camera_offset=(42.9, 0.55), seed=seed)
     w = LaserConverterApp(simulator=sim)
-    w.cb_use_camera_offset.setChecked(True)
+    w.cb_use_camera_offset.setChecked(main_camera)
     w.spin_cam_offset_x.setValue(42.9)
     w.spin_cam_offset_y.setValue(0.55)
     w.cb_invert.setChecked(False)
@@ -68,6 +71,11 @@ def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, seed):
 
     assert w.use_calibration
     assert by_laser == (2 if seed == 99 else 0)
+
+    # После калибровки экран переходит в координаты станка, но под прицелом остается последний репер
+    cx, cy = w.view.get_center_board_coordinates()
+    assert w.geo_context.display_to_local(cx, -cy) == pytest.approx(ctx.raw_to_local(*raw), abs=0.05)
+    assert "Поворот" in w.calib_info_label.text()
     w.process_conversion()
     report = sim.vm.burn(w.generated_gcode, invert=False, step=0.1)
     # Наведение прицела дискретно (пиксель экрана при зуме) — допускаем сотые доли мм
