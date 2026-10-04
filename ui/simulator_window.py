@@ -330,9 +330,8 @@ class SimulatorWindow(QtWidgets.QWidget):
         for item in self._burn_items:
             item.setZValue(5)
 
-        ok = report.max_miss < step / 2 and report.out_of_field == 0 and report.g0_count == 0
-        color = "#2e7d32" if ok else "#c62828"
-        verdict = "Прожиг лег на плату." if ok else "Есть проблемы — смотрите цифры."
+        level, verdict = report.verdict()
+        color = {"ok": "#2e7d32", "warning": "#ef6c00", "error": "#c62828"}[level]
         self.report_label.setText(
             f"<b style='color:{color}'>{verdict}</b><br>" + report.summary().replace("\n", "<br>")
         )

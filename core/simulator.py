@@ -34,11 +34,30 @@ class BurnReport:
     coverage: float = 0.0  # доля целевой площади, покрытая лучом (0..1)
     out_of_field: float = 0.0  # насколько траектория выходит за поле станка, мм (0 — не выходит)
     g0_count: int = 0  # число ускоренных перемещений G0
+    off_board_length: float = 0.0  # длина прожига за пределами платы, мм
+    off_board_max: float = 0.0  # наибольшее удаление прожига от края платы, мм
+    tolerance: float = 0.05  # допуск — полшага растра, мм
+
+    def verdict(self):
+        """("ok" | "warning" | "error", текст вывода)"""
+        if self.burn_length == 0:
+            return "error", "Лазер ничего не прожег."
+        if (
+            self.max_miss >= self.tolerance
+            or self.out_of_field > 1e-9
+            or self.g0_count
+            or self.off_board_length > 0.05 * self.burn_length
+        ):
+            return "error", "Есть проблемы — смотрите цифры."
+        if self.off_board_max > self.tolerance:
+            return "warning", "Прожиг лег на плату, но часть луча выходит за край платы."
+        return "ok", "Прожиг лег на плату."
 
     def summary(self):
         lines = [
             f"Прожиг: {self.burn_length:.1f} мм, покрытие цели {self.coverage * 100:.1f} %",
             f"Мимо цели: {self.miss_length:.2f} мм, наибольший промах {self.max_miss:.3f} мм",
+            f"Вне платы: {self.off_board_length:.1f} мм, до {self.off_board_max:.2f} мм от края",
             ("Выход за поле: нет" if self.out_of_field <= 1e-9 else f"Выход за поле: {self.out_of_field:.2f} мм !"),
         ]
         if self.g0_count:
@@ -205,15 +224,29 @@ class VirtualMachine:
         burn = MultiLineString([((x0, y0), (x1, y1)) for x0, y0, x1, y1 in report.burn_segments])
         report.burn_length = burn.length
         tol = step / 2.0
+        report.tolerance = tol
+
+        # Прожиг за пределами платы (в обоих режимах)
+        off = burn.difference(self.board_outline.buffer(tol))
+        report.off_board_length = off.length
+        if not off.is_empty:
+            report.off_board_max = float(
+                max(shapely.distance(shapely.points(shapely.get_coordinates(off)), self.board_outline))
+            )
 
         if invert:
             target = self.board_outline.difference(self.copper)
             forbidden = self.copper.buffer(-tol)  # жечь по меди нельзя (кромку в полшага прощаем)
-            report.miss_length = burn.intersection(forbidden).length
-            ends = shapely.points([(x, y) for s in report.burn_segments for x, y in (s[:2], s[2:])])
-            inside = shapely.contains_xy(self.copper, *shapely.get_coordinates(ends).T)
-            depth = shapely.distance(ends, self.copper.boundary)
-            report.max_miss = float(max(depth[inside], default=0.0))
+            hits = burn.intersection(forbidden)
+            report.miss_length = hits.length
+            if not hits.is_empty:
+                # Насколько глубоко луч зашел в медь: концы и середины прожженных по меди кусков
+                coords = shapely.get_coordinates(hits)
+                mids = (coords[:-1] + coords[1:]) / 2.0
+                pts = shapely.points(list(coords) + list(mids))
+                inside = shapely.contains_xy(self.copper, *shapely.get_coordinates(pts).T)
+                depth = shapely.distance(pts, self.copper.boundary)
+                report.max_miss = float(max(depth[inside], default=0.0))
         else:
             target = self.copper
             allowed = self.copper.buffer(tol)

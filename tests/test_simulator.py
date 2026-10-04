@@ -135,3 +135,31 @@ def test_burn_reports_out_of_field_and_g0():
     report = vm.burn("G21\nM4 S0\nG1 X-3 Y1 F1000 S0\nG0 X170\nM5")
     assert report.out_of_field == pytest.approx(5.0)
     assert report.g0_count == 1
+
+
+def test_shifted_burn_is_reported_as_error_in_invert_mode():
+    """Плата, уехавшая на смещение камеры: в инверсии прожиг мимо меди не считается промахом,
+    но прожиг вне платы и выход за поле должны дать вердикт «ошибка»"""
+    g = sample_geometries("test140x90-B_Cu.gbr")
+    vm = VirtualMachine(g, seed=3, max_rotation=0.5)
+    ctx = GerberGeometryContext(list(g))
+    calibrate_and_burn(vm, ctx, invert=True)  # правильная калибровка
+    a, b, d, e, dx, dy = ctx.matrix_coeffs
+    ctx.matrix_coeffs = (a, b, d, e, dx - 42.9, dy - 0.55)  # «забыли» смещение камеры
+    geom, bounds = ctx.get_burn_geometry(invert=True)
+    report = vm.burn(generate_gcode(geom, bounds, GcodeParams(step=0.1)).gcode, invert=True, step=0.1)
+    assert report.off_board_length > 0.05 * report.burn_length
+    assert report.verdict()[0] == "error"
+
+
+@pytest.mark.parametrize("sample", ["test.gbr", "test70x70.gbr"])
+@pytest.mark.parametrize("seed", [1, 2])
+def test_invert_mask_follows_rotated_board(sample, seed):
+    """Маска инверсии строится по контуру платы, повернутому вместе с ней. Раньше это был прямоугольник
+    по осям станка: на плате, повернутой на 4-5°, до 40 % прожига уходило мимо платы"""
+    g = sample_geometries(sample)
+    vm = VirtualMachine(g, seed=seed, max_rotation=5.0)
+    report = calibrate_and_burn(vm, GerberGeometryContext(list(g)), invert=True)
+    assert report.off_board_length < 1e-3
+    assert report.coverage > 0.99
+    assert report.verdict()[0] == "ok"

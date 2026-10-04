@@ -49,10 +49,21 @@ class GerberGeometryContext:
         if not elements:
             return None, None
         merged = unary_union(elements)
-        bounds = merged.bounds
         if invert:
-            merged = box(*bounds).difference(merged)
-        return merged, bounds
+            # Маска — контур платы минус медь. Контур трансформируется вместе с платой: на повернутой
+            # плате это повернутый прямоугольник, а не прямоугольник по осям станка (его углы выходили
+            # за плату, и лазер жег мимо нее)
+            outline = self.board_outline()
+            return outline.difference(merged), outline.bounds
+        return merged, merged.bounds
+
+    def board_outline(self):
+        """Контур платы (габаритный прямоугольник Gerber-файла) в координатах экрана/станка"""
+        _, _, rot_xmin, rot_ymin = self._local_frame()
+        raw_xmin, raw_ymin, raw_xmax, raw_ymax = self.get_raw_bounds()
+        center = (raw_xmin + (raw_xmax - raw_xmin) / 2.0, raw_ymin + (raw_ymax - raw_ymin) / 2.0)
+        outline = self._flip_rotate(box(raw_xmin, raw_ymin, raw_xmax, raw_ymax), center)
+        return self._place(outline, rot_xmin, rot_ymin)
 
     def local_to_display(self, x, y):
         """Точка в локальных координатах платы (после зеркал/поворота, прижата к 0,0) -> координаты экрана/станка"""
@@ -115,22 +126,20 @@ class GerberGeometryContext:
         _, temp_geoms, rot_xmin, rot_ymin = self._local_frame()
 
         # Шаг Б: Применяем позиционирование станка / камеры
-        transformed = []
-        for geom in temp_geoms:
-            # Сдвигаем повернутую плату к локальному нулю (0,0) ее новых повернутых габаритов
-            geom = translate(geom, xoff=-rot_xmin, yoff=-rot_ymin)
+        return [self._place(geom, rot_xmin, rot_ymin) for geom in temp_geoms]
 
-            if self.use_calibration and self.matrix_coeffs:
-                # РЕЖИМ 1: Применяем калибровку МНК по реперам
-                geom = affine_transform(geom, self.matrix_coeffs)
-            else:
-                # РЕЖИМ 2: Обычный ручной режим (просто прибавляем смещение камеры)
-                if self.use_camera_offset:
-                    geom = translate(geom, xoff=self.camera_offset_x, yoff=self.camera_offset_y)
+    def _place(self, geom, rot_xmin, rot_ymin):
+        """Геометрия после зеркал/поворота -> координаты экрана/станка"""
+        # Сдвигаем повернутую плату к локальному нулю (0,0) ее новых повернутых габаритов
+        geom = translate(geom, xoff=-rot_xmin, yoff=-rot_ymin)
 
-            transformed.append(geom)
-
-        return transformed
+        if self.use_calibration and self.matrix_coeffs:
+            # РЕЖИМ 1: Применяем калибровку МНК по реперам
+            return affine_transform(geom, self.matrix_coeffs)
+        # РЕЖИМ 2: Обычный ручной режим (просто прибавляем смещение камеры)
+        if self.use_camera_offset:
+            geom = translate(geom, xoff=self.camera_offset_x, yoff=self.camera_offset_y)
+        return geom
 
 
 def _collect_edges(geom):
