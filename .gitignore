@@ -6,3 +6,4 @@ venv
 .vscode
 .continue
 __pycache__
+.pytest_cache
