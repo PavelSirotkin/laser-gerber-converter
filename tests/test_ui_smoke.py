@@ -27,7 +27,6 @@ def test_window_preview_and_gcode(qapp):
 
     cfg = config("base")
     w.cb_enable_calib.setChecked(False)
-    w.cb_use_camera_offset.setChecked(False)
     w.cb_flip_x.setChecked(False)
     w.cb_flip_y.setChecked(False)
     w.cb_invert.setChecked(False)
@@ -66,7 +65,6 @@ def test_crosshair_reaches_board_corners(qapp, zoom):
     w.resize(1400, 800)
     w.show()
     w.cb_enable_calib.setChecked(False)
-    w.cb_use_camera_offset.setChecked(False)
     w.spin_rotate.setValue(0.0)
     w.load_gerber_geometry(os.path.join(SAMPLES, "test.gbr"))
     qapp.processEvents()

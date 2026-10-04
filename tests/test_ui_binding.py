@@ -34,7 +34,7 @@ def make_window(qapp, simulator=None, sample="test.gbr"):
     w = LaserConverterApp(simulator=simulator)
     w.spin_cam_offset_x.setValue(CAMERA[0])
     w.spin_cam_offset_y.setValue(CAMERA[1])
-    w.cb_use_camera_offset.setChecked(True)
+    w.last_aimed_by_camera = True
     w.cb_invert.setChecked(False)
     w.cb_flip_x.setChecked(False)
     w.spin_rotate.setValue(0.0)
@@ -171,7 +171,7 @@ def test_without_binding_field_is_not_checked(qapp):
 
 def test_clipboard_coordinates_prefill_dialog(qapp, accept_dialogs):
     w = make_window(qapp)
-    w.cb_use_camera_offset.setChecked(False)
+    w.last_aimed_by_camera = False
     w.cb_enable_calib.setChecked(True)
     QtWidgets.QApplication.clipboard().setText("<Idle|MPos:12.500,30.250,0.000|FS:0,0>")
     w.capture_point_in_crosshair(0)
@@ -212,3 +212,18 @@ def test_binding_restored_from_previous_session(qapp, accept_dialogs):
     assert w2.use_calibration and w2.cb_enable_calib.isChecked()
     assert w2.matrix_coeffs == pytest.approx(coeffs)
     assert w2.manual_mach_pts[1] is not None and w2.manual_mach_pts[2] is None
+
+
+def test_dialog_remembers_last_aiming(qapp, accept_dialogs):
+    """Окно ввода открывается с выбором «камерой / лазером» как у предыдущей точки, и между сеансами тоже"""
+    from ui.main_window import LaserConverterApp
+
+    sim = make_simulator(seed=99, rotation=0.0)  # первый репер в мертвой зоне — его наводят лазером
+    w = make_window(qapp, sim)
+    capture_fiducials(qapp, w, sim, [0])
+    assert w.manual_mach_pts[0][2] is False and w.last_aimed_by_camera is False
+    assert LaserConverterApp().last_aimed_by_camera is False
+
+    capture_fiducials(qapp, w, sim, [0, 1])  # второй репер камера видит
+    assert w.manual_mach_pts[1][2] is True and w.last_aimed_by_camera is True
+    assert LaserConverterApp().last_aimed_by_camera is True

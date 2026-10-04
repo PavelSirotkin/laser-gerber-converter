@@ -42,6 +42,10 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.use_calibration = False
         self.matrix_coeffs = None
 
+        # Чем наводилась последняя точка (камерой — к DRO прибавляется смещение камеры).
+        # Окно ввода координат открывается с этим выбором; запоминается между сеансами
+        self.last_aimed_by_camera = False
+
         self._loading_settings = False
         self.init_ui()
         self.load_saved_settings()
@@ -136,12 +140,6 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.spin_cam_offset_y = self._spin(grid, 3, "Камера Y (Лазер -> Камера):", -5000, 5000, 0.0, 4, 0.1)
         for box in (self.spin_cam_offset_x, self.spin_cam_offset_y):
             box.setToolTip("Положение камеры относительно лазера, мм. Может быть отрицательным.")
-        self.cb_use_camera_offset = QtWidgets.QCheckBox("Точки наводятся камерой (по умолчанию)")
-        self.cb_use_camera_offset.setToolTip(
-            "Начальное состояние галочки «Учитывать смещение камеры» в окне ввода координат станка.\n"
-            "Смещение применяется только к точкам, наведенным камерой, и не сдвигает рисунок."
-        )
-        grid.addWidget(self.cb_use_camera_offset, 4, 0, 1, 2)
         self.left_layout.addWidget(self.machine_group)
 
         # БЛОК 5: Привязка платы по точкам
@@ -265,7 +263,6 @@ class LaserConverterApp(QtWidgets.QWidget):
             "cb_invert": (self.cb_invert, False),
             "cb_flip_x": (self.cb_flip_x, False),
             "cb_flip_y": (self.cb_flip_y, False),
-            "use_camera_offset": (self.cb_use_camera_offset, False),
             "cam_offset_x": (self.spin_cam_offset_x, 0.0),
             "cam_offset_y": (self.spin_cam_offset_y, 0.0),
             "field_w": (self.spin_field_w, 165.0),
@@ -308,6 +305,8 @@ class LaserConverterApp(QtWidgets.QWidget):
             for widget, _ in widgets.values():
                 widget.blockSignals(False)
 
+        # Ключ use_camera_offset — от прежней галочки «компенсация смещения камеры»
+        self.last_aimed_by_camera = str(self.settings.value("use_camera_offset", "false")).lower() == "true"
         self._load_saved_calibration()
         self._loading_settings = False
 
@@ -363,6 +362,7 @@ class LaserConverterApp(QtWidgets.QWidget):
             else:
                 value = widget.value()
             self.settings.setValue(key, value)
+        self.settings.setValue("use_camera_offset", "true" if self.last_aimed_by_camera else "false")
         self.settings.sync()
 
     def _save_calibration(self):
@@ -566,7 +566,7 @@ class LaserConverterApp(QtWidgets.QWidget):
         spin_y = self._spin(grid, 1, "Координата Y станка (мм):", -9999.0, 9999.0, -scene_y, 4, 0.1)
 
         cb_add_cam = QtWidgets.QCheckBox(f"Наведено камерой: учитывать смещение ({cam_x:+.4f}, {cam_y:+.4f} мм)")
-        cb_add_cam.setChecked(self.cb_use_camera_offset.isChecked())
+        cb_add_cam.setChecked(self.last_aimed_by_camera)  # как у предыдущей точки
         dialog_layout.addWidget(cb_add_cam)
 
         source_label = QtWidgets.QLabel()
@@ -626,6 +626,8 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.redraw_calibration_markers()
             return
 
+        self.last_aimed_by_camera = cb_add_cam.isChecked()
+        self.save_current_settings()
         mach_x, mach_y = spin_x.value(), spin_y.value()
         if cb_add_cam.isChecked():
             mach_x += cam_x
