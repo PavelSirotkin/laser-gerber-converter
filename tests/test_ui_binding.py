@@ -57,7 +57,6 @@ def make_simulator(seed, rotation, scale_pct=0.0):
 
 def capture_fiducials(qapp, w, sim, indices):
     """Как оператор: наводит камеру симулятора (или лазер в мертвой зоне) и прицел окна на реперы"""
-    w.cb_enable_calib.setChecked(True)
     qapp.processEvents()
     w.view.scale(20, 20)
     ctx = w.geo_context
@@ -172,7 +171,6 @@ def test_without_binding_field_is_not_checked(qapp):
 def test_clipboard_coordinates_prefill_dialog(qapp, accept_dialogs):
     w = make_window(qapp)
     w.last_aimed_by_camera = False
-    w.cb_enable_calib.setChecked(True)
     QtWidgets.QApplication.clipboard().setText("<Idle|MPos:12.500,30.250,0.000|FS:0,0>")
     w.capture_point_in_crosshair(0)
     assert w.manual_mach_pts[0] == pytest.approx((12.5, 30.25, False))
@@ -209,7 +207,7 @@ def test_binding_restored_from_previous_session(qapp, accept_dialogs):
     coeffs = w.matrix_coeffs
 
     w2 = LaserConverterApp()
-    assert w2.use_calibration and w2.cb_enable_calib.isChecked()
+    assert w2.use_calibration
     assert w2.matrix_coeffs == pytest.approx(coeffs)
     assert w2.manual_mach_pts[1] is not None and w2.manual_mach_pts[2] is None
 

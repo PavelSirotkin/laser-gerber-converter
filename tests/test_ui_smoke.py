@@ -26,7 +26,6 @@ def test_window_preview_and_gcode(qapp):
     assert w.geo_context is not None
 
     cfg = config("base")
-    w.cb_enable_calib.setChecked(False)
     w.cb_flip_x.setChecked(False)
     w.cb_flip_y.setChecked(False)
     w.cb_invert.setChecked(False)
@@ -65,7 +64,6 @@ def test_crosshair_reaches_board_corners(qapp, zoom):
     w = LaserConverterApp()
     w.resize(1400, 800)
     w.show()
-    w.cb_enable_calib.setChecked(False)
     w.spin_rotate.setValue(0.0)
     w.load_gerber_geometry(os.path.join(SAMPLES, "test.gbr"))
     qapp.processEvents()
@@ -99,3 +97,37 @@ def test_corrupt_calibration_in_ini_is_ignored(qapp, tmp_path):
     assert w.geo_context is not None
     assert "Ошибка" not in w.status_label.text()
     w.close()
+
+
+def test_tabs_layout_and_start_on_print(qapp):
+    """Слева вкладки «Печать» / «Настройки» (с подвкладками «Лазер» и «Станок и камера»);
+    приложение всегда стартует на «Печати», прицел привязки включен всегда"""
+    from ui.main_window import LaserConverterApp
+
+    w = LaserConverterApp()
+    assert [w.tabs.tabText(i) for i in range(w.tabs.count())] == ["Печать", "Настройки"]
+    assert [w.settings_tabs.tabText(i) for i in range(w.settings_tabs.count())] == ["Лазер", "Станок и камера"]
+    assert w.tabs.currentIndex() == 0
+    assert w.view.calibration_mode
+
+    def tab_of(widget):
+        while widget is not None and widget not in (w.tab_print, w.settings_tabs):
+            widget = widget.parentWidget()
+        return "Печать" if widget is w.tab_print else "Настройки"
+
+    for widget in (
+        w.entry_path,
+        w.cb_invert,
+        w.cb_flip_x,
+        w.spin_rotate,
+        w.combo_calib_model,
+        w.btn_pt1,
+        w.btn_convert,
+    ):
+        assert tab_of(widget) == "Печать"
+    for widget in (w.spin_power, w.spin_feed, w.spin_step, w.spin_overscan, w.spin_field_w, w.spin_cam_offset_x):
+        assert tab_of(widget) == "Настройки"
+
+    w.tabs.setCurrentIndex(1)  # даже если в прошлый раз закрыли на «Настройках»
+    w.close()
+    assert LaserConverterApp().tabs.currentIndex() == 0

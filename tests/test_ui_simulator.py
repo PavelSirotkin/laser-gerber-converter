@@ -41,7 +41,6 @@ def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, seed, last_cam
     w.resize(1400, 800)
     w.show()
     w.load_gerber_geometry(os.path.join(SAMPLES, "test.gbr"))
-    w.cb_enable_calib.setChecked(True)
     qapp.processEvents()
     w.view.scale(20, 20)  # оператор приближает вид для точного наведения
 

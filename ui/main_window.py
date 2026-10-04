@@ -66,6 +66,18 @@ class LaserConverterApp(QtWidgets.QWidget):
         grid.addWidget(box, row, 1)
         return box
 
+    @staticmethod
+    def _scroll_page(layout):
+        """Страница вкладки с прокруткой (растяжку в конец layout добавляет вызывающий, после содержимого)"""
+        page = QtWidgets.QWidget()
+        page.setLayout(layout)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(page)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        return scroll
+
     def init_ui(self):
         self.setWindowTitle("LaserGRBL Raster Converter & Native Visualizer (OOP-Engine)")
         self.setMinimumWidth(1150)
@@ -74,30 +86,24 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.layout_horizontal = QtWidgets.QHBoxLayout()
         self.setLayout(self.layout_horizontal)
 
-        # Левая панель управления — в прокрутке, чтобы помещалась на небольших экранах
-        self.left_panel = QtWidgets.QWidget()
-        self.left_layout = QtWidgets.QVBoxLayout()
-        self.left_panel.setLayout(self.left_layout)
-        left_scroll = QtWidgets.QScrollArea()
-        left_scroll.setWidget(self.left_panel)
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        left_scroll.setFixedWidth(455)
-        self.layout_horizontal.addWidget(left_scroll)
+        # Левая панель: вкладки «Печать» (работа с платой) и «Настройки» (лазер, станок и камера).
+        # Приложение всегда стартует на вкладке «Печать»
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setFixedWidth(455)
+        self.layout_horizontal.addWidget(self.tabs)
 
-        # БЛОК 1: Исходный файл Gerber
-        self.file_group = QtWidgets.QGroupBox("Исходный файл Gerber")
-        self.file_layout = QtWidgets.QHBoxLayout()
-        self.file_group.setLayout(self.file_layout)
-        self.entry_path = QtWidgets.QLineEdit()
-        self.entry_path.setPlaceholderText("Выберите .gbr файл...")
-        self.file_layout.addWidget(self.entry_path)
-        self.btn_browse = QtWidgets.QPushButton("Обзор...")
-        self.btn_browse.clicked.connect(self.browse_file)
-        self.file_layout.addWidget(self.btn_browse)
-        self.left_layout.addWidget(self.file_group)
+        print_layout = QtWidgets.QVBoxLayout()
+        self.tab_print = self._scroll_page(print_layout)
+        self.tabs.addTab(self.tab_print, "Печать")
 
-        # БЛОК 2: Параметры лазера
+        self.settings_tabs = QtWidgets.QTabWidget()
+        self.tabs.addTab(self.settings_tabs, "Настройки")
+        laser_layout = QtWidgets.QVBoxLayout()
+        machine_layout = QtWidgets.QVBoxLayout()
+        self.settings_tabs.addTab(self._scroll_page(laser_layout), "Лазер")
+        self.settings_tabs.addTab(self._scroll_page(machine_layout), "Станок и камера")
+
+        # ===== Настройки → Лазер =====
         self.param_group = QtWidgets.QGroupBox("Параметры лазера")
         grid = QtWidgets.QGridLayout()
         self.param_group.setLayout(grid)
@@ -114,10 +120,33 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.spin_feed = self._spin(grid, 4, "Скорость гравировки (мм/мин):", 1, 30000, 1500)
         self.spin_step = self._spin(grid, 5, "Шаг строки / Луч (мм):", 0.001, 10.0, 0.1, 4, 0.01)
         self.spin_overscan = self._spin(grid, 6, "Вылет каретки Overscan (мм):", 0.0, 50.0, 2.0, 1, 0.5)
-        self.spin_rotate = self._spin(grid, 7, "Точный поворот стола (град):", -360.0, 360.0, 0.0, 4, 0.01)
-        self.left_layout.addWidget(self.param_group)
+        laser_layout.addWidget(self.param_group)
 
-        # БЛОК 3: Режимы работы и зеркалирование
+        # ===== Настройки → Станок и камера =====
+        self.machine_group = QtWidgets.QGroupBox("Станок и камера")
+        grid = QtWidgets.QGridLayout()
+        self.machine_group.setLayout(grid)
+        self.spin_field_w = self._spin(grid, 0, "Рабочее поле X (мм):", 1.0, 5000.0, 165.0, 1, 1.0)
+        self.spin_field_h = self._spin(grid, 1, "Рабочее поле Y (мм):", 1.0, 5000.0, 95.0, 1, 1.0)
+        self.spin_cam_offset_x = self._spin(grid, 2, "Камера X (Лазер -> Камера):", -5000, 5000, 0.0, 4, 0.1)
+        self.spin_cam_offset_y = self._spin(grid, 3, "Камера Y (Лазер -> Камера):", -5000, 5000, 0.0, 4, 0.1)
+        for box in (self.spin_cam_offset_x, self.spin_cam_offset_y):
+            box.setToolTip("Положение камеры относительно лазера, мм. Может быть отрицательным.")
+        machine_layout.addWidget(self.machine_group)
+
+        # ===== Печать: файл =====
+        self.file_group = QtWidgets.QGroupBox("Исходный файл Gerber")
+        self.file_layout = QtWidgets.QHBoxLayout()
+        self.file_group.setLayout(self.file_layout)
+        self.entry_path = QtWidgets.QLineEdit()
+        self.entry_path.setPlaceholderText("Выберите .gbr файл...")
+        self.file_layout.addWidget(self.entry_path)
+        self.btn_browse = QtWidgets.QPushButton("Обзор...")
+        self.btn_browse.clicked.connect(self.browse_file)
+        self.file_layout.addWidget(self.btn_browse)
+        print_layout.addWidget(self.file_group)
+
+        # ===== Печать: режимы, зеркала и поворот платы =====
         self.modes_group = QtWidgets.QGroupBox("Режимы работы и зеркалирование")
         self.modes_layout = QtWidgets.QGridLayout()
         self.modes_group.setLayout(self.modes_layout)
@@ -130,26 +159,12 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.modes_layout.addWidget(self.cb_flip_x, 1, 0)
         self.cb_flip_y = QtWidgets.QCheckBox("Отзеркалить по Y")
         self.modes_layout.addWidget(self.cb_flip_y, 1, 1)
-        self.left_layout.addWidget(self.modes_group)
+        rotate_grid = QtWidgets.QGridLayout()
+        self.spin_rotate = self._spin(rotate_grid, 0, "Точный поворот стола (град):", -360.0, 360.0, 0.0, 4, 0.01)
+        self.modes_layout.addLayout(rotate_grid, 2, 0, 1, 2)
+        print_layout.addWidget(self.modes_group)
 
-        # БЛОК 4: Станок и камера
-        self.machine_group = QtWidgets.QGroupBox("Станок и камера")
-        grid = QtWidgets.QGridLayout()
-        self.machine_group.setLayout(grid)
-        self.spin_field_w = self._spin(grid, 0, "Рабочее поле X (мм):", 1.0, 5000.0, 165.0, 1, 1.0)
-        self.spin_field_h = self._spin(grid, 1, "Рабочее поле Y (мм):", 1.0, 5000.0, 95.0, 1, 1.0)
-        self.spin_cam_offset_x = self._spin(grid, 2, "Камера X (Лазер -> Камера):", -5000, 5000, 0.0, 4, 0.1)
-        self.spin_cam_offset_y = self._spin(grid, 3, "Камера Y (Лазер -> Камера):", -5000, 5000, 0.0, 4, 0.1)
-        for box in (self.spin_cam_offset_x, self.spin_cam_offset_y):
-            box.setToolTip("Положение камеры относительно лазера, мм. Может быть отрицательным.")
-        self.left_layout.addWidget(self.machine_group)
-
-        # БЛОК 5: Привязка платы по точкам
-        self.cb_enable_calib = QtWidgets.QCheckBox("Включить привязку платы по точкам")
-        self.cb_enable_calib.setStyleSheet("font-weight: bold; color: #0288d1; margin-top: 5px;")
-        self.cb_enable_calib.stateChanged.connect(self.toggle_manual_calibration)
-        self.left_layout.addWidget(self.cb_enable_calib)
-
+        # ===== Печать: привязка платы по точкам (режим всегда активен) =====
         self.calib_group = QtWidgets.QGroupBox("Привязка по центральному прицелу")
         self.calib_layout = QtWidgets.QVBoxLayout()
         self.calib_group.setLayout(self.calib_layout)
@@ -190,8 +205,32 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.calib_info_label.setWordWrap(True)
         self.calib_info_label.setStyleSheet("color: #2e7d32;")
         self.calib_layout.addWidget(self.calib_info_label)
-        self.left_layout.addWidget(self.calib_group)
-        self.calib_group.setVisible(False)
+        print_layout.addWidget(self.calib_group)
+
+        # ===== Печать: статус и пусковые кнопки =====
+        self.status_label = QtWidgets.QLabel("Статус: Ожидание выбора файла...")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: gray; font-weight: bold;")
+        print_layout.addWidget(self.status_label)
+
+        self.btn_convert = QtWidgets.QPushButton("Рассчитать траекторию и превью")
+        self.btn_convert.setStyleSheet(
+            "font-weight: bold; font-size: 13px; padding: 6px; background-color: #0288d1; color: white;"
+        )
+        self.btn_convert.clicked.connect(self.process_conversion)
+        print_layout.addWidget(self.btn_convert)
+
+        self.btn_save = QtWidgets.QPushButton("Скачать / Сохранить G-Code")
+        self.btn_save.setStyleSheet(
+            "font-weight: bold; font-size: 14px; padding: 10px; background-color: #2e7d32; color: white;"
+        )
+        self.btn_save.setDisabled(True)
+        self.btn_save.clicked.connect(self.save_gcode_dialog)
+        print_layout.addWidget(self.btn_save)
+
+        # Содержимое вкладок прижато к верху
+        for layout in (print_layout, laser_layout, machine_layout):
+            layout.addStretch(1)
 
         # Любое изменение параметра сразу сохраняется в INI; влияющие на рисунок — обновляют превью
         for widget in self._settings_widgets().values():
@@ -210,34 +249,13 @@ class LaserConverterApp(QtWidgets.QWidget):
         ):
             self._changed_signal(widget).connect(self.update_interactive_preview)
 
-        # Статус-бар и пусковые кнопки ЧПУ
-        self.status_label = QtWidgets.QLabel("Статус: Ожидание выбора файла...")
-        self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("color: gray; font-weight: bold;")
-        self.left_layout.addWidget(self.status_label)
-
-        self.btn_convert = QtWidgets.QPushButton("Рассчитать траекторию и превью")
-        self.btn_convert.setStyleSheet(
-            "font-weight: bold; font-size: 13px; padding: 6px; background-color: #0288d1; color: white;"
-        )
-        self.btn_convert.clicked.connect(self.process_conversion)
-        self.left_layout.addWidget(self.btn_convert)
-
-        self.btn_save = QtWidgets.QPushButton("Скачать / Сохранить G-Code")
-        self.btn_save.setStyleSheet(
-            "font-weight: bold; font-size: 14px; padding: 10px; background-color: #2e7d32; color: white;"
-        )
-        self.btn_save.setDisabled(True)
-        self.btn_save.clicked.connect(self.save_gcode_dialog)
-        self.left_layout.addWidget(self.btn_save)
-        self.left_layout.addStretch(1)
-
-        # Правый графический холст интерактивной визуализации
+        # Правый графический холст интерактивной визуализации; прицел привязки виден всегда
         self.plot_group = QtWidgets.QGroupBox("Экран интерактивной визуализации векторов")
         self.plot_layout = QtWidgets.QVBoxLayout()
         self.plot_group.setLayout(self.plot_layout)
 
         self.view = LaserGraphicsView()
+        self.view.calibration_mode = True
         self.plot_layout.addWidget(self.view)
         self.layout_horizontal.addWidget(self.plot_group, 1)
 
@@ -342,10 +360,6 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.matrix_coeffs = coeffs
             self.use_calibration = True
             self.calib_info_label.setText(f"Привязка из прошлого сеанса: {describe_affine(coeffs)}")
-            self.cb_enable_calib.blockSignals(True)
-            self.cb_enable_calib.setChecked(True)
-            self.cb_enable_calib.blockSignals(False)
-            self._show_calibration_ui(True)
         except (TypeError, ValueError) as e:
             print(f"Ошибка загрузки калибровки из INI: {e}")
             self.matrix_coeffs = None
@@ -449,20 +463,6 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.geo_context.matrix_coeffs = self.matrix_coeffs
 
     # ------------------------------------------------------------------ привязка по точкам
-
-    def _show_calibration_ui(self, active):
-        self.calib_group.setVisible(active)
-        self.view.calibration_mode = active
-        if active:
-            self.view.scrollContentsBy(0, 0)
-        self.view.viewport().update()
-
-    def toggle_manual_calibration(self, state):
-        """Включение/выключение режима центрального HUD-прицела и панели реперов"""
-        is_active = state == 2
-        self._show_calibration_ui(is_active)
-        if not is_active:
-            self.reset_points()
 
     def reset_points(self):
         """Сбрасывает все точки и привязку"""
@@ -655,7 +655,7 @@ class LaserConverterApp(QtWidgets.QWidget):
             except RuntimeError:
                 pass  # объект уже удален вместе со scene.clear()
         self.manual_markers = [None] * POINT_COUNT
-        if not self.geo_context or not self.cb_enable_calib.isChecked():
+        if not self.geo_context:
             return
 
         self.sync_geometry_context()
@@ -765,9 +765,6 @@ class LaserConverterApp(QtWidgets.QWidget):
         if not self.geo_context:
             return
         self.save_current_settings()
-
-        self.view.calibration_mode = False
-        self.view.overlay.update()
 
         self.status_label.setText("Статус: Оптимизация слоев...")
         self.status_label.setStyleSheet("color: orange;")
