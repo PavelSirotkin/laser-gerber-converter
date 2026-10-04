@@ -1201,8 +1201,8 @@ class LaserConverterApp(QtWidgets.QWidget):
             contour_s = self.spin_contour_power.value()
             gcode.append(f"M3 S0;")
             # Замкнутый прямоугольник по габаритам платы (без overscan — это зона разгона, а не плата)
-            gcode.append(f"G0 X{xmin:.4f} Y{ymin:.4f}")
-            gcode.append(f"G1 X{xmax:.4f} Y{ymin:.4f} F1000 S{contour_s}")
+            gcode.append(f"G1 X{xmin:.4f} Y{ymin:.4f} F1000 S0")
+            gcode.append(f"G1 X{xmax:.4f} Y{ymin:.4f} S{contour_s}")
             gcode.append(f"G1 X{xmax:.4f} Y{ymax:.4f}")
             gcode.append(f"G1 X{xmin:.4f} Y{ymax:.4f}")
             gcode.append(f"G1 X{xmin:.4f} Y{ymin:.4f}")
@@ -1236,7 +1236,7 @@ class LaserConverterApp(QtWidgets.QWidget):
                 # ГЕНЕРАЦИЯ ТРАЕКТОРИИ И КРАСНЫХ ХОДОВ ОВЕРСКАНА
                 if direction_right or not snake_mode:
                     # Движение слева направо: стартуем из левой точки разгона
-                    gcode.append(f"G0 X{line_start_x:.4f} Y{current_y:.4f}")
+                    gcode.append(f"G1 X{line_start_x:.4f} Y{current_y:.4f} S0")
                     red_overscan_path.moveTo(line_start_x, -current_y)
 
                     last_x = line_start_x
@@ -1254,7 +1254,7 @@ class LaserConverterApp(QtWidgets.QWidget):
                         red_overscan_path.lineTo(line_end_x, -current_y)
                 else:
                     # Движение справа налево (режим змейки): стартуем из правой точки разгона
-                    gcode.append(f"G0 X{line_end_x:.4f} Y{current_y:.4f}")
+                    gcode.append(f"G1 X{line_end_x:.4f} Y{current_y:.4f} S0")
                     red_overscan_path.moveTo(line_end_x, -current_y)
 
                     last_x = line_end_x
@@ -1274,7 +1274,7 @@ class LaserConverterApp(QtWidgets.QWidget):
                 if snake_mode: 
                     direction_right = not direction_right
 
-            gcode.append(f"M5\nG0 X0.000 Y0.000\nM2")
+            gcode.append(f"M5\nG1 X0.000 Y0.000 S0\nM2")
             self.generated_gcode = "\n".join(gcode)
             self.view.scene.clear()
             self.view.setBackgroundBrush(QtGui.QColor("#f0f0f0"))
