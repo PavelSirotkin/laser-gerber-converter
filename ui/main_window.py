@@ -132,6 +132,7 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.spin_cam_offset_y = self._spin(grid, 3, "Камера Y (Лазер -> Камера):", -5000, 5000, 0.0, 4, 0.1)
         for box in (self.spin_cam_offset_x, self.spin_cam_offset_y):
             box.setToolTip("Положение камеры относительно лазера, мм. Может быть отрицательным.")
+        self.spin_rotate = self._spin(grid, 4, "Точный поворот стола (град):", -360.0, 360.0, 0.0, 4, 0.01)
         machine_layout.addWidget(self.machine_group)
 
         # ===== Печать: файл =====
@@ -146,7 +147,7 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.file_layout.addWidget(self.btn_browse)
         print_layout.addWidget(self.file_group)
 
-        # ===== Печать: режимы, зеркала и поворот платы =====
+        # ===== Печать: режимы и зеркала =====
         self.modes_group = QtWidgets.QGroupBox("Режимы работы и зеркалирование")
         self.modes_layout = QtWidgets.QGridLayout()
         self.modes_group.setLayout(self.modes_layout)
@@ -159,9 +160,6 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.modes_layout.addWidget(self.cb_flip_x, 1, 0)
         self.cb_flip_y = QtWidgets.QCheckBox("Отзеркалить по Y")
         self.modes_layout.addWidget(self.cb_flip_y, 1, 1)
-        rotate_grid = QtWidgets.QGridLayout()
-        self.spin_rotate = self._spin(rotate_grid, 0, "Точный поворот стола (град):", -360.0, 360.0, 0.0, 4, 0.01)
-        self.modes_layout.addLayout(rotate_grid, 2, 0, 1, 2)
         print_layout.addWidget(self.modes_group)
 
         # ===== Печать: привязка платы по точкам (режим всегда активен) =====

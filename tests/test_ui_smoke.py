@@ -119,13 +119,20 @@ def test_tabs_layout_and_start_on_print(qapp):
         w.entry_path,
         w.cb_invert,
         w.cb_flip_x,
-        w.spin_rotate,
         w.combo_calib_model,
         w.btn_pt1,
         w.btn_convert,
     ):
         assert tab_of(widget) == "Печать"
-    for widget in (w.spin_power, w.spin_feed, w.spin_step, w.spin_overscan, w.spin_field_w, w.spin_cam_offset_x):
+    for widget in (
+        w.spin_power,
+        w.spin_feed,
+        w.spin_step,
+        w.spin_overscan,
+        w.spin_field_w,
+        w.spin_cam_offset_x,
+        w.spin_rotate,
+    ):
         assert tab_of(widget) == "Настройки"
 
     w.tabs.setCurrentIndex(1)  # даже если в прошлый раз закрыли на «Настройках»
