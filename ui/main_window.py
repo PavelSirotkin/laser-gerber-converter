@@ -792,7 +792,7 @@ class LaserConverterApp(QtWidgets.QWidget):
             if burn_geom is None:
                 return
 
-            toolpath = generate_gcode(burn_geom, bounds, params)
+            toolpath = generate_gcode(burn_geom, bounds, params, outline=self.geo_context.board_outline())
             self.generated_gcode = toolpath.gcode
             self.view.scene.clear()
             self._add_machine_field()

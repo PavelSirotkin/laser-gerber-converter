@@ -45,12 +45,13 @@ def test_window_preview_and_gcode(qapp):
     scene_rect = board_items[0].sceneBoundingRect()
     for it in board_items[1:]:
         scene_rect = scene_rect.united(it.sceneBoundingRect())
-    burn_geom, (xmin, ymin, xmax, ymax) = make_context("test.gbr", cfg).get_burn_geometry()
+    ctx = make_context("test.gbr", cfg)
+    burn_geom, (xmin, ymin, xmax, ymax) = ctx.get_burn_geometry()
     assert scene_rect.right() == pytest.approx(xmax, abs=1e-6)
     assert -scene_rect.top() == pytest.approx(ymax, abs=1e-6)
 
     w.process_conversion()
-    expected = generate_gcode(burn_geom, (xmin, ymin, xmax, ymax), make_params(cfg)).gcode
+    expected = generate_gcode(burn_geom, (xmin, ymin, xmax, ymax), make_params(cfg), outline=ctx.board_outline()).gcode
     assert w.generated_gcode == expected
     w.close()
 

@@ -14,8 +14,9 @@ GOLDEN = json.load(open(os.path.join(os.path.dirname(__file__), "data", "golden_
 
 def build(sample, name):
     cfg = config(name)
-    burn_geom, bounds = make_context(sample, cfg).get_burn_geometry(invert=cfg["invert"])
-    return generate_gcode(burn_geom, bounds, make_params(cfg)), bounds
+    ctx = make_context(sample, cfg)
+    burn_geom, bounds = ctx.get_burn_geometry(invert=cfg["invert"])
+    return generate_gcode(burn_geom, bounds, make_params(cfg), outline=ctx.board_outline()), bounds
 
 
 @pytest.mark.parametrize("sample", SAMPLE_FILES)
@@ -88,3 +89,18 @@ def test_contour_and_raster_feed_rates():
     pause = lines.index("M0 ;")
     assert [f for i, f in feeds if i < pause] == [600]
     assert [f for i, f in feeds if i > pause] == [1500]
+
+
+def test_contour_points_start_near_zero_and_go_counterclockwise():
+    from shapely.affinity import rotate
+
+    from core.gcode import contour_points
+
+    board = rotate(box(10, 10, 60, 40), 7, origin=(35, 25))
+    pts = contour_points(board.bounds, board)
+    assert len(pts) == 4
+    assert pts[0] == min(pts, key=lambda p: p[0] + p[1])  # ближе всего к нулю станка
+    area2 = sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1) in zip(pts, pts[1:] + pts[:1], strict=True))
+    assert area2 > 0  # против часовой стрелки
+    # Без контура — прямоугольник по габаритам, как раньше
+    assert contour_points((0, 0, 5, 3)) == [(0, 0), (5, 0), (5, 3), (0, 3)]

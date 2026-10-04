@@ -3,6 +3,8 @@
 import math
 from dataclasses import dataclass, field
 
+from shapely.geometry.polygon import orient
+
 from core.geometry import scanline_intervals
 
 
@@ -26,8 +28,20 @@ class Toolpath:
     travel_segments: list = field(default_factory=list)  # [(y, x_from, x_to)] — холостые ходы и overscan
 
 
-def generate_gcode(burn_geom, bounds, params):
-    """Растровый G-код по геометрии прожига в координатах станка. bounds — габариты платы (xmin, ymin, xmax, ymax)."""
+def contour_points(bounds, outline=None):
+    """Вершины тестового контура: обход против часовой стрелки от угла, ближайшего к нулю станка.
+    outline — контур платы (shapely Polygon) в координатах станка; без него — прямоугольник по габаритам"""
+    if outline is None:
+        xmin, ymin, xmax, ymax = (float(v) for v in bounds)
+        return [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
+    ring = list(orient(outline, sign=1.0).exterior.coords)[:-1]
+    start = min(range(len(ring)), key=lambda i: (ring[i][0] + ring[i][1], ring[i][1]))
+    return [(float(x), float(y)) for x, y in ring[start:] + ring[:start]]
+
+
+def generate_gcode(burn_geom, bounds, params, outline=None):
+    """Растровый G-код по геометрии прожига в координатах станка. bounds — габариты платы (xmin, ymin, xmax, ymax),
+    outline — контур платы для тестового обхода (на повернутой плате это повернутый прямоугольник)."""
     xmin, ymin, xmax, ymax = (float(v) for v in bounds)
     p = params
 
@@ -37,12 +51,12 @@ def generate_gcode(burn_geom, bounds, params):
 
     # --- ТЕСТОВЫЙ ОБХОД КОНТУРА ПЛАТЫ СТАНОЧНЫМ ЛУЧОМ ---
     gcode.append("M3 S0;")
-    # Замкнутый прямоугольник по габаритам платы (без overscan — это зона разгона, а не плата)
-    gcode.append(f"G1 X{xmin:.4f} Y{ymin:.4f} F{p.contour_feed} S0")
-    gcode.append(f"G1 X{xmax:.4f} Y{ymin:.4f} S{p.contour_power}")
-    gcode.append(f"G1 X{xmax:.4f} Y{ymax:.4f}")
-    gcode.append(f"G1 X{xmin:.4f} Y{ymax:.4f}")
-    gcode.append(f"G1 X{xmin:.4f} Y{ymin:.4f}")
+    # Замкнутый контур платы (без overscan — это зона разгона, а не плата)
+    corners = contour_points(bounds, outline)
+    x0, y0 = corners[0]
+    gcode.append(f"G1 X{x0:.4f} Y{y0:.4f} F{p.contour_feed} S0")
+    for i, (x, y) in enumerate(corners[1:] + corners[:1]):
+        gcode.append(f"G1 X{x:.4f} Y{y:.4f}" + (f" S{p.contour_power}" if i == 0 else ""))
     gcode.append("M5\nG4 P0.5\nM0 ;")
 
     gcode.append(f"{p.laser_mode} S0\nG1 F{p.feedrate}")

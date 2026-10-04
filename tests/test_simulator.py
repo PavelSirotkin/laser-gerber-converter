@@ -30,7 +30,7 @@ def calibrate_and_burn(vm, ctx, invert=False, step=0.1, camera_sign=+1):
     ctx.matrix_coeffs = fit_affine(file_pts, mach_pts)
     ctx.use_calibration = True
     geom, bounds = ctx.get_burn_geometry(invert=invert)
-    gcode = generate_gcode(geom, bounds, GcodeParams(step=step, overscan=2.0)).gcode
+    gcode = generate_gcode(geom, bounds, GcodeParams(step=step, overscan=2.0), outline=ctx.board_outline()).gcode
     return vm.burn(gcode, invert=invert, step=step)
 
 
@@ -163,3 +163,24 @@ def test_invert_mask_follows_rotated_board(sample, seed):
     assert report.off_board_length < 1e-3
     assert report.coverage > 0.99
     assert report.verdict()[0] == "ok"
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+def test_contour_follows_true_board_outline(mirror):
+    """Пробный обход контура идет по настоящему краю повернутой платы, а не по описанному прямоугольнику"""
+    import shapely
+
+    g = sample_geometries("test.gbr")
+    vm = VirtualMachine(g, seed=2, max_rotation=5.0, mirror_x=mirror)
+    ctx = GerberGeometryContext(list(g))
+    ctx.flip_x = mirror
+    report = calibrate_and_burn(vm, ctx)
+    corners = [(x1, y1) for _, _, x1, y1 in report.contour_segments]
+    assert len(corners) == 4
+    edge = vm.board_outline.exterior
+    assert max(edge.distance(shapely.Point(p)) for p in corners) < 1e-3
+    # Контур замкнут и обходит все 4 угла платы
+    assert corners[-1] == pytest.approx(report.contour_segments[0][:2], abs=1e-4)
+    true_corners = list(vm.board_outline.exterior.coords)[:-1]
+    for c in true_corners:
+        assert min(shapely.Point(c).distance(shapely.Point(p)) for p in corners) < 1e-3
