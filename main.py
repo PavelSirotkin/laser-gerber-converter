@@ -63,6 +63,28 @@ class GerberGeometryContext:
             merged = box(*bounds).difference(merged)
         return merged, bounds
 
+    def local_to_display(self, x, y):
+        """Точка в локальных координатах платы (после зеркал/поворота, прижата к 0,0) -> координаты экрана/станка"""
+        if self.use_calibration and self.matrix_coeffs:
+            m11, m21, m12, m22, dx, dy = self.matrix_coeffs
+            return m11 * x + m21 * y + dx, m12 * x + m22 * y + dy
+        if self.use_camera_offset:
+            return x + self.camera_offset_x, y + self.camera_offset_y
+        return x, y
+
+    def display_to_local(self, x, y):
+        """Обратное преобразование: координаты экрана/станка -> локальные координаты платы"""
+        if self.use_calibration and self.matrix_coeffs:
+            m11, m21, m12, m22, dx, dy = self.matrix_coeffs
+            det = m11 * m22 - m21 * m12
+            if abs(det) < 1e-12:
+                raise ValueError("Матрица калибровки вырождена — точки лежат на одной прямой?")
+            px, py = x - dx, y - dy
+            return (m22 * px - m21 * py) / det, (-m12 * px + m11 * py) / det
+        if self.use_camera_offset:
+            return x - self.camera_offset_x, y - self.camera_offset_y
+        return x, y
+
     def get_transformed_elements(self):
         """Возвращает массив геометрий со всеми примененными смещениями."""
         if not self.raw_geometries:
@@ -773,13 +795,9 @@ class LaserConverterApp(QtWidgets.QWidget):
 
         if not is_active:
             self.use_calibration = False
-            for marker in self.manual_markers:
-                if marker:
-                    try: self.view.scene.removeItem(marker)
-                    except: pass
             self.manual_file_pts = [None, None, None, None]
             self.manual_mach_pts = [None, None, None, None]
-            self.manual_markers = [None, None, None, None]
+            self.redraw_calibration_markers()
 
             if hasattr(self, 'btn_pt1'): self.btn_pt1.setText("Зафиксировать Точку 1")
             if hasattr(self, 'btn_pt2'): self.btn_pt2.setText("Зафиксировать Точку 2")
@@ -801,12 +819,9 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.btn_pt4.setEnabled(is_active)
 
         if not is_active:
-            if self.manual_markers[3]:
-                try: self.view.scene.removeItem(self.manual_markers[3])
-                except: pass
             self.manual_file_pts[3] = None
             self.manual_mach_pts[3] = None
-            self.manual_markers[3] = None
+            self.redraw_calibration_markers()
             self.btn_pt4.setText("Зафиксировать Точку 4")
             self.btn_pt4.setStyleSheet("")
 
@@ -829,24 +844,15 @@ class LaserConverterApp(QtWidgets.QWidget):
         cam_x = self.spin_cam_offset_x.value() if (is_camera_active and hasattr(self, 'spin_cam_offset_x')) else 0.0
         cam_y = self.spin_cam_offset_y.value() if (is_camera_active and hasattr(self, 'spin_cam_offset_y')) else 0.0
 
-        # Чистые локальные координаты точки относительно угла платы (в попугаях для МНК)
-        exact_file_x = scene_x - cam_x
-        exact_file_y = (-scene_y) - cam_y
-
-        # Сохраняем скрытые координаты для МНК
-        self.manual_file_pts[point_idx] = (exact_file_x, exact_file_y)
-        
-        if self.manual_markers[point_idx]:
-            try: self.view.scene.removeItem(self.manual_markers[point_idx])
-            except: pass
-
-        colors = ["#ff1744", "#2979ff", "#00e676", "#e040fb"]
-        marker = QtWidgets.QGraphicsEllipseItem(scene_x - 0.4, scene_y - 0.4, 0.8, 0.8)
-        marker.setBrush(QtGui.QBrush(QtGui.QColor(colors[point_idx])))
-        marker.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.15))
-
-        self.view.scene.addItem(marker)
-        self.manual_markers[point_idx] = marker
+        # Локальные координаты точки на плате для МНК. Экран может показывать плату как со
+        # смещением камеры, так и уже с примененной калибровкой — снимаем ровно то, что на экране.
+        self.sync_geometry_context()
+        try:
+            self.manual_file_pts[point_idx] = self.geo_context.display_to_local(scene_x, -scene_y)
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "Внимание", str(e))
+            return
+        self.redraw_calibration_markers()
         self.status_label.setText(f"Статус: Точка {point_idx + 1} зафиксирована в прицеле.")
         self.status_label.setStyleSheet("color: #0288d1;")
 
@@ -921,11 +927,8 @@ class LaserConverterApp(QtWidgets.QWidget):
                 if p1_3_ready and p4_ready:
                     self.calculate_manual_affine_matrix()
             else:
-                if self.manual_markers[point_idx]:
-                    try: self.view.scene.removeItem(self.manual_markers[point_idx])
-                    except: pass
                 self.manual_file_pts[point_idx] = None
-                self.manual_markers[point_idx] = None
+                self.redraw_calibration_markers()
                 buttons[point_idx].setText(f"Зафиксировать Точку {point_idx + 1}")
                 buttons[point_idx].setStyleSheet("")
         except Exception as e:
@@ -934,6 +937,32 @@ class LaserConverterApp(QtWidgets.QWidget):
             print("="*105 + "\n")
             QtWidgets.QMessageBox.critical(self, "Ошибка", f"Сбой работы окна ввода: {str(e)}")
 
+
+    def redraw_calibration_markers(self):
+        """Рисует отметки реперов по их локальным координатам платы в текущей системе экрана.
+        После расчета матрицы отметки должны лечь точно на реперы — это визуальная проверка калибровки."""
+        for marker in self.manual_markers:
+            try:
+                if marker is not None and marker.scene() is self.view.scene:
+                    self.view.scene.removeItem(marker)
+            except RuntimeError:
+                pass  # объект уже удален вместе со scene.clear()
+        self.manual_markers = [None, None, None, None]
+        if not self.geo_context or not self.cb_enable_calib.isChecked():
+            return
+
+        self.sync_geometry_context()
+        colors = ["#ff1744", "#2979ff", "#00e676", "#e040fb"]
+        for idx, pt in enumerate(self.manual_file_pts):
+            if pt is None:
+                continue
+            x, y = self.geo_context.local_to_display(*pt)
+            marker = QtWidgets.QGraphicsEllipseItem(x - 0.4, -y - 0.4, 0.8, 0.8)
+            marker.setBrush(QtGui.QBrush(QtGui.QColor(colors[idx])))
+            marker.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.15))
+            marker.setZValue(10)
+            self.view.scene.addItem(marker)
+            self.manual_markers[idx] = marker
 
     def calculate_manual_affine_matrix(self):
         """Расчет аффинной матрицы, автоматически адаптирующийся под 3 или 4 точки методом МНК"""
@@ -954,6 +983,12 @@ class LaserConverterApp(QtWidgets.QWidget):
             for idx in range(len(valid_indices)):
                 A[idx] = [x_f[idx], y_f[idx], 1]
 
+            if np.linalg.matrix_rank(A, tol=1e-6) < 3:
+                QtWidgets.QMessageBox.warning(self, "Внимание",
+                    "Точки совпадают или лежат на одной прямой — калибровка невозможна.\n"
+                    "Перезафиксируйте точки, разнеся их по площади платы.")
+                return
+
             res_x = np.linalg.lstsq(A, X_m, rcond=None)[0]
             res_y = np.linalg.lstsq(A, Y_m, rcond=None)[0]
 
@@ -967,13 +1002,6 @@ class LaserConverterApp(QtWidgets.QWidget):
             pts_count = len(valid_indices)
             self.status_label.setText(f"Статус: Базирование выполнено успешно по {pts_count} точкам!")
             self.status_label.setStyleSheet("color: green; font-weight: bold;")
-
-            # Очищаем временные маркеры фиксации
-            for marker in self.manual_markers:
-                if marker:
-                    try: self.view.scene.removeItem(marker)
-                    except: pass
-            self.manual_markers = [None, None, None, None]
 
             self.update_interactive_preview()
 
@@ -1013,6 +1041,7 @@ class LaserConverterApp(QtWidgets.QWidget):
 
         try:
             self.view.scene.clear()
+            self.manual_markers = [None, None, None, None]
 
             rx_min, ry_min, rx_max, ry_max = self.geo_context.get_raw_bounds()
             if rx_max - rx_min <= 0 or ry_max - ry_min <= 0: return
@@ -1039,6 +1068,7 @@ class LaserConverterApp(QtWidgets.QWidget):
             home_marker.setBrush(QtGui.QBrush(QtGui.QColor("#ff0000")))
             home_marker.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.2))
             self.view.scene.addItem(home_marker)
+            self.redraw_calibration_markers()
 
             # Выводим оператору физические координаты линеек станка
             self.status_label.setText((
