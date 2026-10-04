@@ -49,3 +49,29 @@ def test_window_preview_and_gcode(qapp):
     expected = generate_gcode(burn_geom, (xmin, ymin, xmax, ymax), make_params(cfg)).gcode
     assert w.generated_gcode == expected
     w.close()
+
+
+@pytest.mark.parametrize("zoom", [1, 8])
+def test_crosshair_reaches_board_corners(qapp, zoom):
+    """Под центральный прицел можно подвести любую точку платы — и при «вписать в окно», и при зуме.
+    Раньше вид упирался в границы сцены: все точки фиксировались в одном месте или со сдвигом"""
+    from ui.main_window import LaserConverterApp
+
+    w = LaserConverterApp()
+    w.resize(1400, 800)
+    w.show()
+    w.cb_enable_calib.setChecked(False)
+    w.cb_use_camera_offset.setChecked(False)
+    w.spin_rotate.setValue(0.0)
+    w.load_gerber_geometry(os.path.join(SAMPLES, "test.gbr"))
+    qapp.processEvents()
+    w.view.scale(zoom, zoom)
+    _, (xmin, ymin, xmax, ymax) = w.geo_context.get_burn_geometry()
+
+    pixel_mm = 1.0 / w.view.transform().m11()
+    for x, y in [(xmin, ymin), (xmax, ymin), (xmin, ymax), (xmax, ymax)]:
+        w.view.centerOn(x, -y)
+        qapp.processEvents()
+        cx, cy = w.view.get_center_board_coordinates()
+        assert (cx, -cy) == pytest.approx((x, y), abs=2 * pixel_mm)
+    w.close()

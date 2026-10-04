@@ -3,6 +3,9 @@ import math
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 
+# Насколько далеко от нуля можно прокрутить вид, мм
+SCROLL_LIMIT_MM = 2000.0
+
 
 class CrosshairOverlay(QtWidgets.QWidget):
     """Кастомное прозрачное 'стекло' поверх экрана. Рисует прицел во весь экран и HUD-координаты."""
@@ -95,6 +98,11 @@ class LaserGraphicsView(QtWidgets.QGraphicsView):
 
         # Инициализируем оверлей прицела и крепим его поверх вьюпорта
         self.overlay = CrosshairOverlay(self)
+
+        # (после создания прицела — setSceneRect сразу вызывает scrollContentsBy)
+        # Область прокрутки с большим запасом вокруг платы: иначе при «вписать в окно» вид не двигается,
+        # а при зуме края платы не подвести под центральный прицел (он упирается в границу сцены)
+        self.setSceneRect(QtCore.QRectF(-SCROLL_LIMIT_MM, -SCROLL_LIMIT_MM, 2 * SCROLL_LIMIT_MM, 2 * SCROLL_LIMIT_MM))
     def resizeEvent(self, event):
         """Растягиваем прозрачное стекло прицела вслед за изменением окна виджета"""
         super().resizeEvent(event)

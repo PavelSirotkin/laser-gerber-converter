@@ -34,8 +34,12 @@ def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, use_camera):
     w.cb_flip_x.setChecked(False)
     w.spin_rotate.setValue(0.0)
     w.spin_step.setValue(0.1)
+    w.resize(1400, 800)
+    w.show()
     w.load_gerber_geometry(os.path.join(SAMPLES, "test.gbr"))
     w.cb_enable_calib.setChecked(True)
+    qapp.processEvents()
+    w.view.scale(20, 20)  # оператор приближает вид для точного наведения
 
     ctx = w.geo_context
     xmin, ymin, xmax, ymax = ctx.get_raw_bounds()
@@ -48,13 +52,17 @@ def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, use_camera):
         # В программе: совместить прицел с тем же репером на рисунке
         w.sync_geometry_context()
         sx, sy = ctx.local_to_display(*ctx.raw_to_local(*raw))
-        monkeypatch.setattr(w.view, "get_center_board_coordinates", lambda sx=sx, sy=sy: (sx, -sy))
+        w.view.centerOn(sx, -sy)  # прокрутка вида, как при перетаскивании мышью
+        qapp.processEvents()
+        cx, cy = w.view.get_center_board_coordinates()
+        assert (cx, -cy) == pytest.approx((sx, sy), abs=0.01), "репер не удалось подвести под прицел"
         w.capture_point_in_crosshair(idx)
 
     assert w.use_calibration
     w.process_conversion()
     report = sim.vm.burn(w.generated_gcode, invert=False, step=0.1)
-    assert report.max_miss < 1e-3
+    # Наведение прицела дискретно (пиксель экрана при зуме) — допускаем сотые доли мм
+    assert report.max_miss < 0.05
     assert report.coverage > 0.9
     assert "Прожиг лег на плату" in sim.report_label.text()
     w.close()
