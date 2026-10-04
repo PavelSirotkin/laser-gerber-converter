@@ -1,6 +1,6 @@
 """Окно «Станок (симуляция)» для режима --test: виртуальный стол с платой в скрытом положении.
 
-ЛКМ наводит камеру (голова станка едет следом и упирается в край поля), колесо — зум,
+ЛКМ наводит камеру или лазер (голова станка едет следом и упирается в край поля), колесо — зум,
 ПКМ — сдвиг вида, стрелки — шаг головы. После расчета траектории окно «прожигает» G-код
 поверх настоящего положения платы и показывает, легли ли линии на медь.
 """
@@ -23,7 +23,7 @@ def _segments_path(segments):
 
 
 class SimulatorView(LaserGraphicsView):
-    """Вид стола: ЛКМ — навести камеру, ПКМ — сдвиг вида, стрелки — шаг головы"""
+    """Вид стола: ЛКМ — навести камеру/лазер, ПКМ — сдвиг вида, стрелки — шаг головы"""
 
     camera_requested = QtCore.pyqtSignal(float, float)
     jog_requested = QtCore.pyqtSignal(float, float)
@@ -92,6 +92,7 @@ class SimulatorWindow(QtWidgets.QWidget):
         self.setMinimumSize(1000, 650)
         self.raw_geometries = None
         self.vm = None
+        self.blocked = False  # голова уперлась в край поля и не дошла до точки наведения
         self.seed = seed if seed is not None else random.randrange(1, 10**6)
         self._burn_items = []
 
@@ -132,16 +133,30 @@ class SimulatorWindow(QtWidgets.QWidget):
         grid.addWidget(btn_new, 6, 1)
         form.addWidget(machine_group)
 
+        aim_group = QtWidgets.QGroupBox("ЛКМ наводит")
+        aim_layout = QtWidgets.QHBoxLayout(aim_group)
+        self.rb_aim_camera = QtWidgets.QRadioButton("камеру")
+        self.rb_aim_laser = QtWidgets.QRadioButton("лазер (указатель)")
+        self.rb_aim_camera.setChecked(True)
+        aim_layout.addWidget(self.rb_aim_camera)
+        aim_layout.addWidget(self.rb_aim_laser)
+        form.addWidget(aim_group)
+
         self.dro_label = QtWidgets.QLabel()
         self.dro_label.setStyleSheet("font-family: monospace; font-size: 13px; font-weight: bold;")
         form.addWidget(self.dro_label)
+
+        self.warning_label = QtWidgets.QLabel()
+        self.warning_label.setWordWrap(True)
+        self.warning_label.setStyleSheet("color: #c62828; font-weight: bold;")
+        form.addWidget(self.warning_label)
 
         self.report_label = QtWidgets.QLabel("Прожиг: рассчитайте траекторию в основном окне.")
         self.report_label.setWordWrap(True)
         form.addWidget(self.report_label)
 
         hint = QtWidgets.QLabel(
-            "ЛКМ — навести камеру (голова едет следом)\n"
+            "ЛКМ — навести камеру или лазер (голова едет следом)\n"
             "Стрелки — шаг 0.1 мм, Shift — 1 мм, Ctrl — 0.01 мм\n"
             "Колесо — зум, ПКМ — сдвиг вида\n\n"
             "Розовая зона — мертвая зона камеры:\n"
@@ -155,7 +170,7 @@ class SimulatorWindow(QtWidgets.QWidget):
         form.addStretch(1)
 
         self.view = SimulatorView()
-        self.view.camera_requested.connect(self.move_camera)
+        self.view.camera_requested.connect(self.aim)
         self.view.jog_requested.connect(self.jog)
         layout.addWidget(self.view)
 
@@ -246,15 +261,38 @@ class SimulatorWindow(QtWidgets.QWidget):
 
     # --- голова станка ---
 
+    @property
+    def aim_by_camera(self):
+        """True — наведение камерой (DRO дополняется смещением камеры), False — лазером-указателем"""
+        return self.rb_aim_camera.isChecked()
+
+    def aim(self, x, y):
+        """Навести на точку стола камеру или лазер — в зависимости от переключателя"""
+        if self.vm:
+            reached = self.vm.move_camera_to(x, y) if self.aim_by_camera else self.vm.move_laser_to(x, y)
+            self.blocked = not reached
+            self._update_dro()
+
     def move_camera(self, x, y):
         if self.vm:
-            self.vm.move_camera_to(x, y)
+            self.blocked = not self.vm.move_camera_to(x, y)
             self._update_dro()
 
     def jog(self, dx, dy):
         if self.vm:
-            self.vm.move_laser_to(self.vm.laser_x + dx, self.vm.laser_y + dy)
+            self.blocked = not self.vm.move_laser_to(self.vm.laser_x + dx, self.vm.laser_y + dy)
             self._update_dro()
+
+    def warning(self):
+        """Предупреждение о наведении или пустая строка"""
+        if not self.blocked:
+            return ""
+        if self.aim_by_camera:
+            return (
+                "Камера не достает до точки: она в мертвой зоне, голова уперлась в край поля. "
+                "Под прицелом не та точка — наведите этот репер лазером."
+            )
+        return "Голова уперлась в край поля: точка вне рабочего поля станка."
 
     def dro(self):
         """Показания станка (положение лазера) или None, если плата не загружена"""
@@ -270,6 +308,7 @@ class SimulatorWindow(QtWidgets.QWidget):
         self.camera_item.setPos(cx, -cy)
         self.link_item.setLine(lx, -ly, cx, -cy)
         self.dro_label.setText(f"DRO (лазер): X {lx:9.4f}  Y {ly:9.4f}\nКамера:      X {cx:9.4f}  Y {cy:9.4f}")
+        self.warning_label.setText(self.warning())
 
     # --- прожиг ---
 

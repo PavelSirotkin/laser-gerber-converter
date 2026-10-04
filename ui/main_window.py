@@ -563,23 +563,34 @@ class LaserConverterApp(QtWidgets.QWidget):
             spin_x.setValue(scene_x)
             spin_y.setValue(-scene_y)
 
+            # Чекбокс автоматического добавления смещения камеры
+            cb_add_cam = QtWidgets.QCheckBox("Учитывать смещение камеры при вводе")
+            cb_add_cam.setChecked(is_camera_active)
+            dialog_layout.addWidget(cb_add_cam)
+
             if self.simulator:
                 # Режим --test: координаты станка берем у виртуального станка, как оператор с экрана DRO
+                sim_info = QtWidgets.QLabel()
+                sim_info.setWordWrap(True)
+
                 def take_simulator_dro():
                     dro = self.simulator.dro()
                     if dro:
                         spin_x.setValue(dro[0])
                         spin_y.setValue(dro[1])
+                        # Наведено камерой — DRO дополняется смещением камеры, лазером — нет
+                        cb_add_cam.setChecked(self.simulator.aim_by_camera)
+                    how = "камерой" if self.simulator.aim_by_camera else "лазером"
+                    warn = self.simulator.warning()
+                    sim_info.setText(
+                        f"Симулятор: наведено {how}." + (f"<br><b style='color:#c62828'>{warn}</b>" if warn else "")
+                    )
 
                 take_simulator_dro()
                 btn_dro = QtWidgets.QPushButton("Взять DRO из симулятора")
                 btn_dro.clicked.connect(take_simulator_dro)
                 dialog_layout.addWidget(btn_dro)
-
-            # Чекбокс автоматического добавления смещения камеры
-            cb_add_cam = QtWidgets.QCheckBox("Учитывать смещение камеры при вводе")
-            cb_add_cam.setChecked(is_camera_active)
-            dialog_layout.addWidget(cb_add_cam)
+                dialog_layout.addWidget(sim_info)
 
             button_box = QtWidgets.QDialogButtonBox(
                 QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel, dialog

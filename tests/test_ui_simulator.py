@@ -17,17 +17,18 @@ def qapp():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
-@pytest.mark.parametrize("use_camera", [True, False])
-def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, use_camera):
+# Укладка 99: два из трех реперов в мертвой зоне камеры — их наводят лазером
+@pytest.mark.parametrize("seed", [5, 99])
+def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, seed):
     from ui.main_window import LaserConverterApp
     from ui.simulator_window import SimulatorWindow
 
     # Диалог ввода координат станка «нажимает OK» сам; DRO подставляется из симулятора
     monkeypatch.setattr(QtWidgets.QDialog, "exec", lambda self: QtWidgets.QDialog.DialogCode.Accepted)
 
-    sim = SimulatorWindow(camera_offset=(42.9, 0.55), seed=5)
+    sim = SimulatorWindow(camera_offset=(42.9, 0.55), seed=seed)
     w = LaserConverterApp(simulator=sim)
-    w.cb_use_camera_offset.setChecked(use_camera)
+    w.cb_use_camera_offset.setChecked(True)
     w.spin_cam_offset_x.setValue(42.9)
     w.spin_cam_offset_y.setValue(0.55)
     w.cb_invert.setChecked(False)
@@ -43,12 +44,19 @@ def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, use_camera):
 
     ctx = w.geo_context
     xmin, ymin, xmax, ymax = ctx.get_raw_bounds()
+    by_laser = 0
     for idx, (fx, fy) in enumerate(FIDUCIALS[:3]):
         raw = (xmin + (xmax - xmin) * fx, ymin + (ymax - ymin) * fy)
         true = sim.vm.true_position(*raw)
-        # На станке: навести на репер камеру (или лазер, если камера не используется)
-        reached = sim.vm.move_camera_to(*true) if use_camera else sim.vm.move_laser_to(*true)
-        assert reached
+        # На станке: навести на репер камеру; если симулятор предупредил о мертвой зоне — лазер
+        sim.rb_aim_camera.setChecked(True)
+        sim.aim(*true)
+        if sim.blocked:
+            assert "мертвой зоне" in sim.warning_label.text()
+            sim.rb_aim_laser.setChecked(True)
+            sim.aim(*true)
+            by_laser += 1
+        assert not sim.blocked
         # В программе: совместить прицел с тем же репером на рисунке
         w.sync_geometry_context()
         sx, sy = ctx.local_to_display(*ctx.raw_to_local(*raw))
@@ -59,6 +67,7 @@ def test_calibration_through_ui_burns_on_board(qapp, monkeypatch, use_camera):
         w.capture_point_in_crosshair(idx)
 
     assert w.use_calibration
+    assert by_laser == (2 if seed == 99 else 0)
     w.process_conversion()
     report = sim.vm.burn(w.generated_gcode, invert=False, step=0.1)
     # Наведение прицела дискретно (пиксель экрана при зуме) — допускаем сотые доли мм
