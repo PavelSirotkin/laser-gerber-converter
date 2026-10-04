@@ -1,7 +1,7 @@
 """Геометрия платы: трансформации в координаты станка и растровое сканирование. Без зависимостей от Qt."""
 import numpy as np
 
-from shapely.geometry import LineString, box
+from shapely.geometry import LineString, Point, box
 from shapely.affinity import rotate, scale, translate, affine_transform
 from shapely.ops import unary_union
 
@@ -75,32 +75,43 @@ class GerberGeometryContext:
             return x - self.camera_offset_x, y - self.camera_offset_y
         return x, y
 
-    def get_transformed_elements(self):
-        """Возвращает массив геометрий со всеми примененными смещениями."""
-        if not self.raw_geometries:
-            return []
+    def _flip_rotate(self, geom, center):
+        """Ручные трансформации интерфейса: сначала зеркала, потом поворот вокруг центра файла"""
+        if self.flip_x or self.flip_y:
+            fx = -1.0 if self.flip_x else 1.0
+            fy = -1.0 if self.flip_y else 1.0
+            geom = scale(geom, xfact=fx, yfact=fy, origin=center)
+        if self.rotate_angle != 0.0:
+            geom = rotate(geom, self.rotate_angle, origin=center)
+        return geom
 
+    def _local_frame(self):
+        """(центр файла, геометрии после зеркал/поворота, xmin, ymin их габаритов)"""
         raw_xmin, raw_ymin, raw_xmax, raw_ymax = self.get_raw_bounds()
         geom_center = (raw_xmin + (raw_xmax - raw_xmin) / 2.0, raw_ymin + (raw_ymax - raw_ymin) / 2.0)
 
         # Шаг А: Сначала ВСЕГДА применяем базовые ручные трансформации интерфейса (Зеркала и Поворот)
-        # Это нужно и для обычного режима, и для калибровки по 3-м точкам!
-        temp_geoms = []
-        for geom in self.raw_geometries:
-            if self.flip_x or self.flip_y:
-                fx = -1.0 if self.flip_x else 1.0
-                fy = -1.0 if self.flip_y else 1.0
-                geom = scale(geom, xfact=fx, yfact=fy, origin=geom_center)
-            
-            if self.rotate_angle != 0.0:
-                geom = rotate(geom, self.rotate_angle, origin=geom_center)
-            
-            temp_geoms.append(geom)
+        # Это нужно и для обычного режима, и для калибровки по точкам
+        temp_geoms = [self._flip_rotate(geom, geom_center) for geom in self.raw_geometries]
 
         # Находим новые минимальные границы повернутого облака векторов платы
         all_bounds = [g.bounds for g in temp_geoms]
         rot_xmin = min(b[0] for b in all_bounds)
         rot_ymin = min(b[1] for b in all_bounds)
+        return geom_center, temp_geoms, rot_xmin, rot_ymin
+
+    def raw_to_local(self, x, y):
+        """Точка в координатах Gerber-файла -> локальные координаты платы (после зеркал/поворота, прижата к 0,0)"""
+        geom_center, _, rot_xmin, rot_ymin = self._local_frame()
+        p = translate(self._flip_rotate(Point(x, y), geom_center), xoff=-rot_xmin, yoff=-rot_ymin)
+        return p.x, p.y
+
+    def get_transformed_elements(self):
+        """Возвращает массив геометрий со всеми примененными смещениями."""
+        if not self.raw_geometries:
+            return []
+
+        _, temp_geoms, rot_xmin, rot_ymin = self._local_frame()
 
         # Шаг Б: Применяем позиционирование станка / камеры
         transformed = []
@@ -109,7 +120,7 @@ class GerberGeometryContext:
             geom = translate(geom, xoff=-rot_xmin, yoff=-rot_ymin)
 
             if self.use_calibration and self.matrix_coeffs:
-                # РЕЖИМ 1: Применяем калибровку МНК ЧПУ поверх уже повернутой на 90 градусов платы!
+                # РЕЖИМ 1: Применяем калибровку МНК по реперам
                 geom = affine_transform(geom, self.matrix_coeffs)
             else:
                 # РЕЖИМ 2: Обычный ручной режим (просто прибавляем смещение камеры)
@@ -117,7 +128,7 @@ class GerberGeometryContext:
                     geom = translate(geom, xoff=self.camera_offset_x, yoff=self.camera_offset_y)
 
             transformed.append(geom)
-            
+
         return transformed
 
 
