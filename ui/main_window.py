@@ -13,8 +13,10 @@ from ui.view import LaserGraphicsView
 
 
 class LaserConverterApp(QtWidgets.QWidget):
-    def __init__(self):
+    def __init__(self, simulator=None):
         super().__init__()
+        # Окно виртуального станка (режим --test) или None
+        self.simulator = simulator
         ini_path = os.path.expanduser("~/.LaserConverterApp.ini")
         self.settings = QtCore.QSettings(ini_path, QtCore.QSettings.Format.IniFormat)
 
@@ -418,6 +420,8 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.geo_context = GerberGeometryContext(load_gerber(gerber_path))
             self.update_interactive_preview()
             self.view.fitInView(self.view.scene.itemsBoundingRect(), QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+            if self.simulator:
+                self.simulator.set_board(self.geo_context.raw_geometries)
         except Exception as e:
             print("\n" + "="*40 + " Ошибка загрузки Gerber " + "="*40)
             traceback.print_exc()
@@ -538,6 +542,18 @@ class LaserConverterApp(QtWidgets.QWidget):
             # Подставляем координаты прицела как стартовое значение
             spin_x.setValue(scene_x)
             spin_y.setValue(-scene_y)
+
+            if self.simulator:
+                # Режим --test: координаты станка берем у виртуального станка, как оператор с экрана DRO
+                def take_simulator_dro():
+                    dro = self.simulator.dro()
+                    if dro:
+                        spin_x.setValue(dro[0])
+                        spin_y.setValue(dro[1])
+                take_simulator_dro()
+                btn_dro = QtWidgets.QPushButton("Взять DRO из симулятора")
+                btn_dro.clicked.connect(take_simulator_dro)
+                dialog_layout.addWidget(btn_dro)
 
             # Чекбокс автоматического добавления смещения камеры
             cb_add_cam = QtWidgets.QCheckBox("Учитывать смещение камеры при вводе")
@@ -766,6 +782,8 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.view.scene.addItem(home_marker)
 
             self.btn_save.setDisabled(False)
+            if self.simulator:
+                self.simulator.show_burn(toolpath.gcode, self.cb_invert.isChecked(), params.step)
             self.status_label.setText(f"Статус: Успешно! Траектория построена ({toolpath.lines_count} строк).")
             self.status_label.setStyleSheet("color: green;")
         except Exception as e:
