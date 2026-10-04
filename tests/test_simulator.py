@@ -1,11 +1,12 @@
 """Сквозная проверка без станка: виртуальный стол со скрытым положением платы."""
+
 import pytest
+from conftest import SAMPLE_FILES, sample_geometries
 
 from core.calibration import fit_affine
 from core.gcode import GcodeParams, generate_gcode
 from core.geometry import GerberGeometryContext
 from core.simulator import MachineConfig, VirtualMachine, parse_gcode
-from conftest import SAMPLE_FILES, sample_geometries
 
 FIDUCIALS = [(0.15, 0.15), (0.85, 0.2), (0.2, 0.85), (0.8, 0.8)]  # доли габаритов файла
 
@@ -20,11 +21,11 @@ def calibrate_and_burn(vm, ctx, invert=False, step=0.1, camera_sign=+1):
         true = vm.true_position(*raw)
         file_pts.append(ctx.raw_to_local(*raw))
         if vm.move_camera_to(*true):
-            ox, oy = vm.config.camera_offset   # галочка «Учитывать смещение камеры»: DRO + смещение
+            ox, oy = vm.config.camera_offset  # галочка «Учитывать смещение камеры»: DRO + смещение
             mach_pts.append((vm.dro[0] + camera_sign * ox, vm.dro[1] + camera_sign * oy))
         else:
             assert vm.move_laser_to(*true), "репер вне поля станка"
-            mach_pts.append(vm.dro)            # навелись лазером-указателем, смещение не нужно
+            mach_pts.append(vm.dro)  # навелись лазером-указателем, смещение не нужно
 
     ctx.matrix_coeffs = fit_affine(file_pts, mach_pts)
     ctx.use_calibration = True
@@ -80,8 +81,11 @@ def test_board_at_field_edge_uses_dead_zone():
     vm = VirtualMachine(sample_geometries("test140x90-B_Cu.gbr"), seed=3, max_rotation=1.0)
     ctx = GerberGeometryContext(list(sample_geometries("test140x90-B_Cu.gbr")))
     xmin, ymin, xmax, ymax = ctx.get_raw_bounds()
-    blind = [p for p in FIDUCIALS
-             if not vm.move_camera_to(*vm.true_position(xmin + (xmax - xmin) * p[0], ymin + (ymax - ymin) * p[1]))]
+    blind = [
+        p
+        for p in FIDUCIALS
+        if not vm.move_camera_to(*vm.true_position(xmin + (xmax - xmin) * p[0], ymin + (ymax - ymin) * p[1]))
+    ]
     assert blind, "ожидался хотя бы один репер в мертвой зоне камеры"
     report = calibrate_and_burn(vm, ctx)
     assert report.max_miss < EXACT and report.coverage > 0.9
@@ -96,17 +100,30 @@ def test_head_stops_at_field_limits():
     vm = VirtualMachine(sample_geometries("test.gbr"), seed=1)
     assert not vm.move_laser_to(-5, 200)
     assert vm.dro == (0.0, vm.config.field_h)
-    assert not vm.move_camera_to(1.0, 10.0)   # левее смещения камеры — мертвая зона
+    assert not vm.move_camera_to(1.0, 10.0)  # левее смещения камеры — мертвая зона
 
 
 def test_parse_gcode_phases_and_laser_state():
-    gcode = "\n".join([
-        "G21 ;", "G90 ;", "M3 S0;",
-        "G1 X0 Y0 F1000 S0", "G1 X10 Y0 S10",   # контур: жжет на малой мощности
-        "M5", "M0 ;", "M4 S0", "G1 F1500",
-        "G1 X0 Y1 S0", "G1 X5 S200", "G0 X8", "G1 X9 S0",
-        "M5", "G1 X0 Y0 S0", "M2",
-    ])
+    gcode = "\n".join(
+        [
+            "G21 ;",
+            "G90 ;",
+            "M3 S0;",
+            "G1 X0 Y0 F1000 S0",
+            "G1 X10 Y0 S10",  # контур: жжет на малой мощности
+            "M5",
+            "M0 ;",
+            "M4 S0",
+            "G1 F1500",
+            "G1 X0 Y1 S0",
+            "G1 X5 S200",
+            "G0 X8",
+            "G1 X9 S0",
+            "M5",
+            "G1 X0 Y0 S0",
+            "M2",
+        ]
+    )
     moves, g0 = parse_gcode(gcode)
     burned = [(m[0], m[2], m[5]) for m in moves if m[4]]
     assert burned == [(0, 10, "contour"), (0, 5, "raster")]

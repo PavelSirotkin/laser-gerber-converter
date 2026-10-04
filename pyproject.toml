@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# E/W — pycodestyle, F — pyflakes (ошибки), B — bugbear (подозрительные конструкции), I — порядок импортов
+select = ["E", "W", "F", "B", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "ui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

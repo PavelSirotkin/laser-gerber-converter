@@ -1,14 +1,14 @@
 """Загрузка Gerber-файла в shapely-геометрию (миллиметры)."""
-from gerbyx.tokenizer import tokenize_gerber
+
 from gerbyx.parser import GerberParser
 from gerbyx.processor import GerberProcessor
-
+from gerbyx.tokenizer import tokenize_gerber
 from shapely.affinity import scale
 
 
 def load_gerber(gerber_path):
     """Парсит Gerber-файл и возвращает список непустых shapely-геометрий в миллиметрах"""
-    with open(gerber_path, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(gerber_path, "r", encoding="utf-8", errors="ignore") as f:
         gerber_source = f.read()
 
     processor = GerberProcessor()

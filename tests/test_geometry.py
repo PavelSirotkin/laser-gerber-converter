@@ -1,8 +1,8 @@
 import pytest
+from conftest import SAMPLE_FILES, config, make_context
 from shapely.geometry import LineString, Point, box
 
 from core.geometry import GerberGeometryContext, scanline_intervals
-from conftest import SAMPLE_FILES, config, make_context
 
 
 def total(segs):

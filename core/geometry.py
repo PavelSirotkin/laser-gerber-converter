@@ -1,8 +1,8 @@
 """Геометрия платы: трансформации в координаты станка и растровое сканирование. Без зависимостей от Qt."""
-import numpy as np
 
+import numpy as np
+from shapely.affinity import affine_transform, rotate, scale, translate
 from shapely.geometry import LineString, Point, box
-from shapely.affinity import rotate, scale, translate, affine_transform
 from shapely.ops import unary_union
 
 
@@ -11,20 +11,21 @@ class GerberGeometryContext:
     Управляет трансформациями: смещением камеры, оверсканом, углами, зеркалами
     и аффинным сопоставлением по реперным точкам станка.
     """
+
     def __init__(self, raw_geometries):
         self.raw_geometries = [g for g in raw_geometries if not g.is_empty]
-        
+
         # Настройки ручной трансформации из UI-крутилок
         self.rotate_angle = 0.0
         self.flip_x = False
         self.flip_y = False
-        
+
         # Смещение камеры и оверскан вылета каретки
         self.camera_offset_x = 0.0
         self.camera_offset_y = 0.0
         self.use_camera_offset = False
         self.overscan = 0.0
-        
+
         # Коэффициенты аффинного базирования по точкам станка
         self.matrix_coeffs = None
         self.use_calibration = False
@@ -38,7 +39,7 @@ class GerberGeometryContext:
             min(b[0] for b in bounds),
             min(b[1] for b in bounds),
             max(b[2] for b in bounds),
-            max(b[3] for b in bounds)
+            max(b[3] for b in bounds),
         )
 
     def get_burn_geometry(self, invert=False):
@@ -139,11 +140,11 @@ def _collect_edges(geom):
     def walk(g):
         if g.is_empty:
             return
-        if g.geom_type == 'Polygon':
+        if g.geom_type == "Polygon":
             for ring in (g.exterior, *g.interiors):
                 c = np.asarray(ring.coords, dtype=float)[:, :2]
                 edges.append(np.hstack([c[:-1], c[1:]]))
-        elif hasattr(g, 'geoms'):
+        elif hasattr(g, "geoms"):
             for sub in g.geoms:
                 walk(sub)
         else:
@@ -166,8 +167,8 @@ def scanline_intervals(geom, ys, x_from, x_to):
     x1, y1, x2, y2, lo, hi = (a[order] for a in (x1, y1, x2, y2, lo, hi))
 
     def crossings(y):
-        n = np.searchsorted(lo, y, side='right')  # ребра, начинающиеся не выше строки
-        sel = hi[:n] > y                           # полуоткрытый интервал [lo, hi) — вершины не считаются дважды
+        n = np.searchsorted(lo, y, side="right")  # ребра, начинающиеся не выше строки
+        sel = hi[:n] > y  # полуоткрытый интервал [lo, hi) — вершины не считаются дважды
         if not sel.any():
             return []
         ex1, ey1, ex2, ey2 = x1[:n][sel], y1[:n][sel], x2[:n][sel], y2[:n][sel]
@@ -185,12 +186,12 @@ def scanline_intervals(geom, ys, x_from, x_to):
             scan_line = LineString([(x_from, y), (x_to, y)])
             for g in others:
                 hit = scan_line.intersection(g)
-                for part in getattr(hit, 'geoms', [hit]):
+                for part in getattr(hit, "geoms", [hit]):
                     if part.is_empty:
                         continue
-                    if part.geom_type == 'Point':
+                    if part.geom_type == "Point":
                         segs.append((part.x - 0.005, part.x + 0.005))
-                    elif part.geom_type == 'LineString':
+                    elif part.geom_type == "LineString":
                         xa, xb = part.coords[0][0], part.coords[-1][0]
                         segs.append((min(xa, xb), max(xa, xb)))
 

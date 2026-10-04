@@ -1,7 +1,8 @@
 """Графический вид платы: миллиметровая сетка, зум и HUD-прицел для базирования."""
+
 import math
 
-from PyQt6 import QtWidgets, QtCore, QtGui
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 # Насколько далеко от нуля можно прокрутить вид, мм
 SCROLL_LIMIT_MM = 2000.0
@@ -9,6 +10,7 @@ SCROLL_LIMIT_MM = 2000.0
 
 class CrosshairOverlay(QtWidgets.QWidget):
     """Кастомное прозрачное 'стекло' поверх экрана. Рисует прицел во весь экран и HUD-координаты."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -31,7 +33,7 @@ class CrosshairOverlay(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
 
         # 1. РИСУЕМ АВИАЦИОННЫЙ ПРИЦЕЛ (HUD)
-        pen = QtGui.QPen(QtGui.QColor(255, 23, 68, 90), 2.0) # Полупрозрачный красный
+        pen = QtGui.QPen(QtGui.QColor(255, 23, 68, 90), 2.0)  # Полупрозрачный красный
         painter.setPen(pen)
 
         cx = self.width() // 2
@@ -55,7 +57,7 @@ class CrosshairOverlay(QtWidgets.QWidget):
         painter.drawRoundedRect(QtCore.QRectF(hud_x, hud_y, hud_w, hud_h), 6.0, 6.0)
 
         # Пишем цифровые значения координат под прицелом
-        painter.setPen(QtGui.QPen(QtGui.QColor("#00e676"))) # Ярко-зеленый люминофор
+        painter.setPen(QtGui.QPen(QtGui.QColor("#00e676")))  # Ярко-зеленый люминофор
         font = painter.font()
         font.setFamily("Monospace")
         font.setPointSizeF(10.0)
@@ -63,18 +65,15 @@ class CrosshairOverlay(QtWidgets.QWidget):
         painter.setFont(font)
 
         # Текст для вывода
-        hud_text = (
-            f" ПРИЦЕЛ:\n"
-            f" X: {self.current_x:>8.4f} мм\n"
-            f" Y: {self.current_y:>8.4f} мм"
-        )
+        hud_text = f" ПРИЦЕЛ:\n X: {self.current_x:>8.4f} мм\n Y: {self.current_y:>8.4f} мм"
 
         painter.drawText(
             QtCore.QRectF(hud_x + 12, hud_y + 6, hud_w - 24, hud_h - 12),
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
-            hud_text
+            hud_text,
         )
         painter.end()
+
 
 class LaserGraphicsView(QtWidgets.QGraphicsView):
     def __init__(self, parent=None):
@@ -103,6 +102,7 @@ class LaserGraphicsView(QtWidgets.QGraphicsView):
         # Область прокрутки с большим запасом вокруг платы: иначе при «вписать в окно» вид не двигается,
         # а при зуме края платы не подвести под центральный прицел (он упирается в границу сцены)
         self.setSceneRect(QtCore.QRectF(-SCROLL_LIMIT_MM, -SCROLL_LIMIT_MM, 2 * SCROLL_LIMIT_MM, 2 * SCROLL_LIMIT_MM))
+
     def resizeEvent(self, event):
         """Растягиваем прозрачное стекло прицела вслед за изменением окна виджета"""
         super().resizeEvent(event)
@@ -136,7 +136,7 @@ class LaserGraphicsView(QtWidgets.QGraphicsView):
 
         if self.calibration_mode:
             main_win = self.window()
-            if hasattr(main_win, 'geo_context') and main_win.geo_context:
+            if hasattr(main_win, "geo_context") and main_win.geo_context:
                 scene_x, scene_y = self.get_center_board_coordinates()
                 self.overlay.set_coordinates(scene_x, -scene_y)
 
@@ -195,4 +195,8 @@ class LaserGraphicsView(QtWidgets.QGraphicsView):
         for y in range((top // 10) * 10, bottom + 10, 10 if step_grid == 1 else step_grid):
             if y != 0:
                 label_y = -y
-                painter.drawText(QtCore.QRectF(-12.0, y - 1.5, 11.0, 3.0), QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter, str(label_y))
+                painter.drawText(
+                    QtCore.QRectF(-12.0, y - 1.5, 11.0, 3.0),
+                    QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                    str(label_y),
+                )

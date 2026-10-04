@@ -1,6 +1,6 @@
+import math
 import os
 import sys
-import math
 from functools import lru_cache
 
 import pytest
@@ -9,9 +9,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLES = os.path.join(ROOT, "samples")
 sys.path.insert(0, ROOT)
 
-from core.gerber import load_gerber  # noqa: E402
-from core.geometry import GerberGeometryContext  # noqa: E402
 from core.gcode import GcodeParams  # noqa: E402
+from core.geometry import GerberGeometryContext  # noqa: E402
+from core.gerber import load_gerber  # noqa: E402
 
 SAMPLE_FILES = ["test.gbr", "test70x70.gbr", "test140x90-B_Cu.gbr"]
 
@@ -19,8 +19,21 @@ SAMPLE_FILES = ["test.gbr", "test70x70.gbr", "test140x90-B_Cu.gbr"]
 _a, _k = math.radians(3.0), 1.002
 CALIB = (_k * math.cos(_a), -_k * math.sin(_a), _k * math.sin(_a), _k * math.cos(_a), 12.5, 7.25)
 
-BASE = dict(laser_mode="M4", contour_power=10, power=1000, feed=1500, step=0.1, overscan=2.0,
-            rotate=0.0, snake=True, invert=False, flip_x=False, flip_y=False, cam=None, calib=None)
+BASE = dict(
+    laser_mode="M4",
+    contour_power=10,
+    power=1000,
+    feed=1500,
+    step=0.1,
+    overscan=2.0,
+    rotate=0.0,
+    snake=True,
+    invert=False,
+    flip_x=False,
+    flip_y=False,
+    cam=None,
+    calib=None,
+)
 
 # Конфигурации эталонного G-кода (tests/data/golden_gcode.json)
 CONFIGS = {
@@ -61,8 +74,15 @@ def make_context(sample, cfg):
 
 
 def make_params(cfg):
-    return GcodeParams(power=cfg["power"], feedrate=cfg["feed"], step=cfg["step"], overscan=cfg["overscan"],
-                       snake=cfg["snake"], laser_mode=cfg["laser_mode"], contour_power=cfg["contour_power"])
+    return GcodeParams(
+        power=cfg["power"],
+        feedrate=cfg["feed"],
+        step=cfg["step"],
+        overscan=cfg["overscan"],
+        snake=cfg["snake"],
+        laser_mode=cfg["laser_mode"],
+        contour_power=cfg["contour_power"],
+    )
 
 
 @pytest.fixture(autouse=True)

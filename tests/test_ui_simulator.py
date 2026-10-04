@@ -1,4 +1,5 @@
 """Режим --test через интерфейс: калибровка в окне по виртуальному станку и «прожиг» результата."""
+
 import os
 
 import pytest
@@ -6,9 +7,8 @@ import pytest
 pytest.importorskip("PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6 import QtWidgets  # noqa: E402
-
 from conftest import SAMPLES  # noqa: E402
+from PyQt6 import QtWidgets  # noqa: E402
 from test_simulator import FIDUCIALS  # noqa: E402
 
 

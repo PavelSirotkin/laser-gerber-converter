@@ -4,9 +4,10 @@
 ПКМ — сдвиг вида, стрелки — шаг головы. После расчета траектории окно «прожигает» G-код
 поверх настоящего положения платы и показывает, легли ли линии на медь.
 """
+
 import random
 
-from PyQt6 import QtWidgets, QtCore, QtGui
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from core.simulator import MachineConfig, VirtualMachine
 from ui.qt_paths import shapely_to_qt_paths
@@ -23,6 +24,7 @@ def _segments_path(segments):
 
 class SimulatorView(LaserGraphicsView):
     """Вид стола: ЛКМ — навести камеру, ПКМ — сдвиг вида, стрелки — шаг головы"""
+
     camera_requested = QtCore.pyqtSignal(float, float)
     jog_requested = QtCore.pyqtSignal(float, float)
 
@@ -64,10 +66,19 @@ class SimulatorView(LaserGraphicsView):
 
     def keyPressEvent(self, event):
         mods = event.modifiers()
-        step = 1.0 if mods & QtCore.Qt.KeyboardModifier.ShiftModifier else \
-            0.01 if mods & QtCore.Qt.KeyboardModifier.ControlModifier else 0.1
-        moves = {QtCore.Qt.Key.Key_Left: (-step, 0), QtCore.Qt.Key.Key_Right: (step, 0),
-                 QtCore.Qt.Key.Key_Up: (0, step), QtCore.Qt.Key.Key_Down: (0, -step)}
+        step = (
+            1.0
+            if mods & QtCore.Qt.KeyboardModifier.ShiftModifier
+            else 0.01
+            if mods & QtCore.Qt.KeyboardModifier.ControlModifier
+            else 0.1
+        )
+        moves = {
+            QtCore.Qt.Key.Key_Left: (-step, 0),
+            QtCore.Qt.Key.Key_Right: (step, 0),
+            QtCore.Qt.Key.Key_Up: (0, step),
+            QtCore.Qt.Key.Key_Down: (0, -step),
+        }
         if event.key() in moves:
             self.jog_requested.emit(*moves[event.key()])
         else:
@@ -137,7 +148,8 @@ class SimulatorWindow(QtWidgets.QWidget):
             "туда камеру навести нельзя, реперы там\n"
             "наводите лазером (без смещения камеры).\n\n"
             "Положение платы скрыто от основного окна —\n"
-            "оно узнает его только через калибровку.")
+            "оно узнает его только через калибровку."
+        )
         hint.setStyleSheet("color: gray;")
         form.addWidget(hint)
         form.addStretch(1)
@@ -152,16 +164,20 @@ class SimulatorWindow(QtWidgets.QWidget):
     # --- укладка платы ---
 
     def config(self):
-        return MachineConfig(self.spin_field_w.value(), self.spin_field_h.value(),
-                             (self.spin_cam_x.value(), self.spin_cam_y.value()))
+        return MachineConfig(
+            self.spin_field_w.value(), self.spin_field_h.value(), (self.spin_cam_x.value(), self.spin_cam_y.value())
+        )
 
     def set_board(self, raw_geometries):
         """Новая плата из основного окна — кладем ее на стол"""
         self.raw_geometries = list(raw_geometries)
         self.relayout()
-        self.view.fitInView(QtCore.QRectF(-10, -self.spin_field_h.value() - 10,
-                                          self.spin_field_w.value() + 20, self.spin_field_h.value() + 20),
-                            QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+        self.view.fitInView(
+            QtCore.QRectF(
+                -10, -self.spin_field_h.value() - 10, self.spin_field_w.value() + 20, self.spin_field_h.value() + 20
+            ),
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+        )
 
     def new_layout(self):
         self.seed = random.randrange(1, 10**6)
@@ -171,8 +187,13 @@ class SimulatorWindow(QtWidgets.QWidget):
         self.seed_label.setText(f"Укладка №{self.seed}")
         if not self.raw_geometries:
             return
-        self.vm = VirtualMachine(self.raw_geometries, config=self.config(), seed=self.seed,
-                                 max_rotation=self.spin_rotation.value(), mirror_x=self.cb_mirror.isChecked())
+        self.vm = VirtualMachine(
+            self.raw_geometries,
+            config=self.config(),
+            seed=self.seed,
+            max_rotation=self.spin_rotation.value(),
+            mirror_x=self.cb_mirror.isChecked(),
+        )
         self._build_scene()
         self.report_label.setText("Прожиг: рассчитайте траекторию в основном окне.")
         self._update_dro()
@@ -183,13 +204,17 @@ class SimulatorWindow(QtWidgets.QWidget):
         self._burn_items = []
         w, h = self.vm.config.field_w, self.vm.config.field_h
 
-        field_item = scene.addRect(QtCore.QRectF(0, -h, w, h), QtGui.QPen(QtGui.QColor("#555555"), 0),
-                                   QtGui.QBrush(QtGui.QColor(255, 255, 255, 140)))
+        field_item = scene.addRect(
+            QtCore.QRectF(0, -h, w, h),
+            QtGui.QPen(QtGui.QColor("#555555"), 0),
+            QtGui.QBrush(QtGui.QColor(255, 255, 255, 140)),
+        )
         field_item.setZValue(-2)
 
         dead, _ = shapely_to_qt_paths(self.vm.camera_dead_zone())
-        dead_item = scene.addPath(dead, QtGui.QPen(QtCore.Qt.PenStyle.NoPen),
-                                  QtGui.QBrush(QtGui.QColor(255, 82, 82, 50)))
+        dead_item = scene.addPath(
+            dead, QtGui.QPen(QtCore.Qt.PenStyle.NoPen), QtGui.QBrush(QtGui.QColor(255, 82, 82, 50))
+        )
         dead_item.setZValue(-1)
 
         outline, _ = shapely_to_qt_paths(self.vm.board_outline)
@@ -201,11 +226,17 @@ class SimulatorWindow(QtWidgets.QWidget):
 
         # Маркеры постоянного экранного размера: лазер (красный крест) и прицел камеры (синий)
         laser = QtGui.QPainterPath()
-        laser.moveTo(-7, 0); laser.lineTo(7, 0); laser.moveTo(0, -7); laser.lineTo(0, 7)
+        laser.moveTo(-7, 0)
+        laser.lineTo(7, 0)
+        laser.moveTo(0, -7)
+        laser.lineTo(0, 7)
         self.laser_item = scene.addPath(laser, QtGui.QPen(QtGui.QColor("#d50000"), 2))
         camera = QtGui.QPainterPath()
         camera.addEllipse(QtCore.QPointF(0, 0), 10, 10)
-        camera.moveTo(-18, 0); camera.lineTo(18, 0); camera.moveTo(0, -18); camera.lineTo(0, 18)
+        camera.moveTo(-18, 0)
+        camera.lineTo(18, 0)
+        camera.moveTo(0, -18)
+        camera.lineTo(0, 18)
         self.camera_item = scene.addPath(camera, QtGui.QPen(QtGui.QColor("#1565c0"), 1.5))
         for item in (self.laser_item, self.camera_item):
             item.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
@@ -238,8 +269,7 @@ class SimulatorWindow(QtWidgets.QWidget):
         self.laser_item.setPos(lx, -ly)
         self.camera_item.setPos(cx, -cy)
         self.link_item.setLine(lx, -ly, cx, -cy)
-        self.dro_label.setText(f"DRO (лазер): X {lx:9.4f}  Y {ly:9.4f}\n"
-                               f"Камера:      X {cx:9.4f}  Y {cy:9.4f}")
+        self.dro_label.setText(f"DRO (лазер): X {lx:9.4f}  Y {ly:9.4f}\nКамера:      X {cx:9.4f}  Y {cy:9.4f}")
 
     # --- прожиг ---
 
@@ -251,10 +281,12 @@ class SimulatorWindow(QtWidgets.QWidget):
             self.view.scene.removeItem(item)
         report = self.vm.burn(gcode, invert=invert, step=step)
 
-        contour = self.view.scene.addPath(_segments_path(report.contour_segments),
-                                          QtGui.QPen(QtGui.QColor("#ff6d00"), 0, QtCore.Qt.PenStyle.DashLine))
-        burn = self.view.scene.addPath(_segments_path(report.burn_segments),
-                                       QtGui.QPen(QtGui.QColor(13, 71, 161, 170), step))
+        contour = self.view.scene.addPath(
+            _segments_path(report.contour_segments), QtGui.QPen(QtGui.QColor("#ff6d00"), 0, QtCore.Qt.PenStyle.DashLine)
+        )
+        burn = self.view.scene.addPath(
+            _segments_path(report.burn_segments), QtGui.QPen(QtGui.QColor(13, 71, 161, 170), step)
+        )
         self._burn_items = [contour, burn]
         for item in self._burn_items:
             item.setZValue(5)
@@ -262,6 +294,7 @@ class SimulatorWindow(QtWidgets.QWidget):
         ok = report.max_miss < step / 2 and report.out_of_field == 0 and report.g0_count == 0
         color = "#2e7d32" if ok else "#c62828"
         verdict = "Прожиг лег на плату." if ok else "Есть проблемы — смотрите цифры."
-        self.report_label.setText(f"<b style='color:{color}'>{verdict}</b><br>"
-                                  + report.summary().replace("\n", "<br>"))
+        self.report_label.setText(
+            f"<b style='color:{color}'>{verdict}</b><br>" + report.summary().replace("\n", "<br>")
+        )
         return report

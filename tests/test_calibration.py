@@ -1,10 +1,10 @@
 import math
 
 import pytest
+from conftest import CALIB
 
 from core.calibration import CalibrationError, fit_affine
 from core.geometry import GerberGeometryContext
-from conftest import CALIB
 
 
 def apply(coeffs, x, y):
@@ -29,10 +29,13 @@ def test_fit_affine_least_squares_averages_error():
     assert max(residuals) < 0.2
 
 
-@pytest.mark.parametrize("file_pts", [
-    [(0, 0), (10, 10), (20, 20)],   # на одной прямой
-    [(5, 5), (5, 5), (5, 5)],       # совпадают
-])
+@pytest.mark.parametrize(
+    "file_pts",
+    [
+        [(0, 0), (10, 10), (20, 20)],  # на одной прямой
+        [(5, 5), (5, 5), (5, 5)],  # совпадают
+    ],
+)
 def test_fit_affine_rejects_degenerate_points(file_pts):
     with pytest.raises(CalibrationError):
         fit_affine(file_pts, [(1, 1), (2, 2), (3, 4)])

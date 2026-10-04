@@ -1,4 +1,5 @@
 """Дымовой тест окна без экрана: загрузка, превью и расчет дают тот же G-код, что и core."""
+
 import os
 
 import pytest
@@ -6,10 +7,10 @@ import pytest
 pytest.importorskip("PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from conftest import SAMPLES, config, make_context, make_params  # noqa: E402
 from PyQt6 import QtWidgets  # noqa: E402
 
 from core.gcode import generate_gcode  # noqa: E402
-from conftest import SAMPLES, config, make_context, make_params  # noqa: E402
 
 
 @pytest.fixture(scope="module")

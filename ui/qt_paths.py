@@ -1,4 +1,5 @@
 """Преобразование геометрии и траекторий в пути QPainterPath для сцены (ось Y сцены направлена вниз)."""
+
 from PyQt6 import QtCore, QtGui
 
 
@@ -16,14 +17,14 @@ def shapely_to_qt_paths(geom):
     def walk(g):
         if g.is_empty:
             return
-        if g.geom_type == 'Polygon':
+        if g.geom_type == "Polygon":
             # После unary_union дырки — настоящие interiors, поэтому OddEven здесь корректен
             fill_path.addPolygon(_ring_to_qpolygon(g.exterior.coords))
             for interior in g.interiors:
                 fill_path.addPolygon(_ring_to_qpolygon(interior.coords))
-        elif g.geom_type in ('LineString', 'LinearRing'):
+        elif g.geom_type in ("LineString", "LinearRing"):
             line_path.addPolygon(_ring_to_qpolygon(g.coords))
-        elif hasattr(g, 'geoms'):
+        elif hasattr(g, "geoms"):
             for sub in g.geoms:
                 walk(sub)
 

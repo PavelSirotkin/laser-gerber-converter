@@ -4,10 +4,10 @@ import os
 import re
 
 import pytest
+from conftest import CONFIGS, SAMPLE_FILES, config, make_context, make_params
 from shapely.geometry import box
 
 from core.gcode import GcodeParams, generate_gcode
-from conftest import CONFIGS, SAMPLE_FILES, config, make_context, make_params
 
 GOLDEN = json.load(open(os.path.join(os.path.dirname(__file__), "data", "golden_gcode.json"), encoding="utf-8"))
 
@@ -36,15 +36,21 @@ def test_contour_is_closed_rectangle_of_board():
     toolpath, (xmin, ymin, xmax, ymax) = build("test.gbr", "base")
     lines = toolpath.gcode.splitlines()
     start = lines.index("M3 S0;") + 1
-    contour = [tuple(map(float, re.findall(r"[XY](-?[\d.]+)", ln))) for ln in lines[start:start + 5]]
-    corners = [(round(xmin, 4), round(ymin, 4)), (round(xmax, 4), round(ymin, 4)),
-               (round(xmax, 4), round(ymax, 4)), (round(xmin, 4), round(ymax, 4)),
-               (round(xmin, 4), round(ymin, 4))]
+    contour = [tuple(map(float, re.findall(r"[XY](-?[\d.]+)", ln))) for ln in lines[start : start + 5]]
+    corners = [
+        (round(xmin, 4), round(ymin, 4)),
+        (round(xmax, 4), round(ymin, 4)),
+        (round(xmax, 4), round(ymax, 4)),
+        (round(xmin, 4), round(ymax, 4)),
+        (round(xmin, 4), round(ymin, 4)),
+    ]
     assert contour == corners
 
 
 def _line_starts(gcode):
-    return [float(m) for m in re.findall(r"^G1 X(-?[\d.]+) Y-?[\d.]+ S0$", gcode, re.MULTILINE)][:-1]  # без возврата в ноль
+    return [float(m) for m in re.findall(r"^G1 X(-?[\d.]+) Y-?[\d.]+ S0$", gcode, re.MULTILINE)][
+        :-1
+    ]  # без возврата в ноль
 
 
 def test_snake_alternates_direction_and_respects_overscan():

@@ -5,6 +5,7 @@
 проверяет, легли ли линии на медь. Программа, которую проверяют, это положение не знает:
 она узнает его только через калибровку, как на настоящем станке. Без зависимостей от Qt.
 """
+
 import math
 import random
 import re
@@ -18,21 +19,21 @@ from shapely.ops import unary_union
 
 @dataclass
 class MachineConfig:
-    field_w: float = 165.0                 # рабочее поле станка по X, мм
-    field_h: float = 95.0                  # рабочее поле станка по Y, мм
-    camera_offset: tuple = (42.9, 0.55)    # положение камеры относительно лазера (Лазер -> Камера), мм
+    field_w: float = 165.0  # рабочее поле станка по X, мм
+    field_h: float = 95.0  # рабочее поле станка по Y, мм
+    camera_offset: tuple = (42.9, 0.55)  # положение камеры относительно лазера (Лазер -> Камера), мм
 
 
 @dataclass
 class BurnReport:
-    burn_segments: list = field(default_factory=list)     # [(x0, y0, x1, y1)] растр, лазер включен
+    burn_segments: list = field(default_factory=list)  # [(x0, y0, x1, y1)] растр, лазер включен
     contour_segments: list = field(default_factory=list)  # [(x0, y0, x1, y1)] тестовый обход контура
-    burn_length: float = 0.0       # длина растрового прожига, мм
-    miss_length: float = 0.0       # длина прожига не туда (мимо меди / по меди в инверсии), мм
-    max_miss: float = 0.0          # наибольший промах конца отрезка прожига, мм
-    coverage: float = 0.0          # доля целевой площади, покрытая лучом (0..1)
-    out_of_field: float = 0.0      # насколько траектория выходит за поле станка, мм (0 — не выходит)
-    g0_count: int = 0              # число ускоренных перемещений G0
+    burn_length: float = 0.0  # длина растрового прожига, мм
+    miss_length: float = 0.0  # длина прожига не туда (мимо меди / по меди в инверсии), мм
+    max_miss: float = 0.0  # наибольший промах конца отрезка прожига, мм
+    coverage: float = 0.0  # доля целевой площади, покрытая лучом (0..1)
+    out_of_field: float = 0.0  # насколько траектория выходит за поле станка, мм (0 — не выходит)
+    g0_count: int = 0  # число ускоренных перемещений G0
 
     def summary(self):
         lines = [
@@ -96,8 +97,16 @@ def parse_gcode(gcode, start=(0.0, 0.0)):
 
 
 class VirtualMachine:
-    def __init__(self, raw_geometries, config=None, seed=None, max_rotation=5.0, max_scale_error=0.002,
-                 mirror_x=False, margin=5.0):
+    def __init__(
+        self,
+        raw_geometries,
+        config=None,
+        seed=None,
+        max_rotation=5.0,
+        max_scale_error=0.002,
+        mirror_x=False,
+        margin=5.0,
+    ):
         """raw_geometries — геометрия Gerber-файла (мм); плата кладется на стол случайно, но целиком в поле"""
         self.config = config or MachineConfig()
         self.raw_geometries = [g for g in raw_geometries if not g.is_empty]
@@ -199,7 +208,7 @@ class VirtualMachine:
 
         if invert:
             target = self.board_outline.difference(self.copper)
-            forbidden = self.copper.buffer(-tol)          # жечь по меди нельзя (кромку в полшага прощаем)
+            forbidden = self.copper.buffer(-tol)  # жечь по меди нельзя (кромку в полшага прощаем)
             report.miss_length = burn.intersection(forbidden).length
             ends = shapely.points([(x, y) for s in report.burn_segments for x, y in (s[:2], s[2:])])
             inside = shapely.contains_xy(self.copper, *shapely.get_coordinates(ends).T)

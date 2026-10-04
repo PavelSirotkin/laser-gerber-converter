@@ -1,4 +1,5 @@
 """Расчет аффинной матрицы привязки платы к станку по реперным точкам."""
+
 import numpy as np
 
 
@@ -23,7 +24,8 @@ def fit_affine(file_pts, mach_pts):
     if np.linalg.matrix_rank(A, tol=1e-6) < 3:
         raise CalibrationError(
             "Точки совпадают или лежат на одной прямой — калибровка невозможна.\n"
-            "Перезафиксируйте точки, разнеся их по площади платы.")
+            "Перезафиксируйте точки, разнеся их по площади платы."
+        )
 
     X_m = [float(p[0]) for p in mach_pts]
     Y_m = [float(p[1]) for p in mach_pts]
