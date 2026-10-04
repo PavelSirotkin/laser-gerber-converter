@@ -131,6 +131,80 @@ class GerberGeometryContext:
         return transformed
 
 
+def _collect_edges(geom):
+    """Все ребра полигонов (x1, y1, x2, y2) и прочие (неплощадные) части геометрии"""
+    edges, others = [], []
+
+    def walk(g):
+        if g.is_empty:
+            return
+        if g.geom_type == 'Polygon':
+            for ring in (g.exterior, *g.interiors):
+                c = np.asarray(ring.coords, dtype=float)[:, :2]
+                edges.append(np.hstack([c[:-1], c[1:]]))
+        elif hasattr(g, 'geoms'):
+            for sub in g.geoms:
+                walk(sub)
+        else:
+            others.append(g)
+
+    walk(geom)
+    edges = np.vstack(edges) if edges else np.zeros((0, 4))
+    return edges, others
+
+
+def scanline_intervals(geom, ys, x_from, x_to):
+    """Отрезки прожига [(x_start, x_end), ...] для каждой строки Y.
+    Пересечения строки с ребрами полигонов считаются векторно (правило even-odd — корректно,
+    т.к. после unary_union дырки являются настоящими interiors). Линии/точки нулевой ширины
+    обрабатываются через shapely, как раньше."""
+    edges, others = _collect_edges(geom)
+    x1, y1, x2, y2 = edges.T if len(edges) else (np.zeros(0),) * 4
+    lo, hi = np.minimum(y1, y2), np.maximum(y1, y2)
+    order = np.argsort(lo)
+    x1, y1, x2, y2, lo, hi = (a[order] for a in (x1, y1, x2, y2, lo, hi))
+
+    def crossings(y):
+        n = np.searchsorted(lo, y, side='right')  # ребра, начинающиеся не выше строки
+        sel = hi[:n] > y                           # полуоткрытый интервал [lo, hi) — вершины не считаются дважды
+        if not sel.any():
+            return []
+        ex1, ey1, ex2, ey2 = x1[:n][sel], y1[:n][sel], x2[:n][sel], y2[:n][sel]
+        xs = np.sort(ex1 + (y - ey1) * (ex2 - ex1) / (ey2 - ey1))
+        return [(float(a), float(b)) for a, b in zip(xs[0::2], xs[1::2]) if b > a]
+
+    # Строка может пройти ровно по горизонтальному ребру (координаты Gerber часто на той же сетке).
+    # Граница считается частью фигуры, как в shapely: объединяем срезы чуть ниже и чуть выше строки.
+    eps = 1e-7
+    result = []
+    for y in ys:
+        segs = crossings(y - eps) + crossings(y + eps)
+
+        if others:
+            scan_line = LineString([(x_from, y), (x_to, y)])
+            for g in others:
+                hit = scan_line.intersection(g)
+                for part in getattr(hit, 'geoms', [hit]):
+                    if part.is_empty:
+                        continue
+                    if part.geom_type == 'Point':
+                        segs.append((part.x - 0.005, part.x + 0.005))
+                    elif part.geom_type == 'LineString':
+                        xa, xb = part.coords[0][0], part.coords[-1][0]
+                        segs.append((min(xa, xb), max(xa, xb)))
+
+        # Слияние перекрывающихся отрезков
+        segs.sort()
+        merged = []
+        for a, b in segs:
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        result.append(merged)
+    return result
+
+
 def _ring_to_qpolygon(coords):
     """Кольцо Shapely -> QPolygonF (ось Y переворачивается: в сцене Qt Y направлен вниз)"""
     return QtGui.QPolygonF([QtCore.QPointF(x, -y) for x, y, *_ in coords])
@@ -1118,7 +1192,6 @@ class LaserConverterApp(QtWidgets.QWidget):
             burn_geom, bounds = self.geo_context.get_burn_geometry(invert=invert_mode)
             if burn_geom is None: return
             xmin, ymin, xmax, ymax = (float(v) for v in bounds)
-            moved_geometries = [burn_geom]
 
             gcode = []
             gcode.append("; Gerber -> LaserGRBL GCode (Real-Space OOP-Engine)")
@@ -1127,11 +1200,12 @@ class LaserConverterApp(QtWidgets.QWidget):
             # --- ТЕСТОВЫЙ ОБХОД КОНТУРА ПЛАТЫ СТАНОЧНЫМ ЛУЧОМ ---
             contour_s = self.spin_contour_power.value()
             gcode.append(f"M3 S0;")
-            gcode.append(f"G1 X{xmin:.4f} Y{ymin:.4f} F1000 S0")
-            gcode.append(f"G1 X{(xmax + overscan):.4f} Y{ymin:.4f} S{contour_s}")
-            gcode.append(f"G1 X{(xmax + overscan):.4f} Y{ymax:.4f}")
-            gcode.append(f"G1 X{(xmin - overscan):.4f} Y{ymax:.4f}")
-            gcode.append(f"G1 X{(xmin - overscan):.4f} Y{ymin:.4f}")
+            # Замкнутый прямоугольник по габаритам платы (без overscan — это зона разгона, а не плата)
+            gcode.append(f"G0 X{xmin:.4f} Y{ymin:.4f}")
+            gcode.append(f"G1 X{xmax:.4f} Y{ymin:.4f} F1000 S{contour_s}")
+            gcode.append(f"G1 X{xmax:.4f} Y{ymax:.4f}")
+            gcode.append(f"G1 X{xmin:.4f} Y{ymax:.4f}")
+            gcode.append(f"G1 X{xmin:.4f} Y{ymin:.4f}")
             gcode.append("M5\nG4 P0.5\nM0 ;")
 
             gcode.append(f"{selected_mode_txt} S0\nG1 F{feedrate}")
@@ -1143,41 +1217,12 @@ class LaserConverterApp(QtWidgets.QWidget):
             blue_laser_path = QtGui.QPainterPath()
             red_overscan_path = QtGui.QPainterPath()
 
-            for line_idx in range(lines_count):
-                current_y = ymin + (line_idx * step) + (step / 2.0)
-                if current_y > ymax: current_y = ymax
+            scan_ys = [min(ymin + (i * step) + (step / 2.0), ymax) for i in range(lines_count)]
+            self.status_label.setText(f"Расчет пересечений: {lines_count} строк...")
+            QtWidgets.QApplication.processEvents()
+            all_segments = scanline_intervals(burn_geom, scan_ys, xmin - 0.5, xmax + 0.5)
 
-                if line_idx % 200 == 0:
-                    self.status_label.setText(f"Расчет: строка {line_idx} из {lines_count}...")
-                    QtWidgets.QApplication.processEvents()
-
-                # Сканируем линию строго в пределах физических границ платы
-                scan_line = LineString([(xmin - 0.5, current_y), (xmax + 0.5, current_y)])
-                segments_coords = []
-
-                for target_geom in moved_geometries:
-                    laser_on_segments = scan_line.intersection(target_geom)
-                    if not laser_on_segments.is_empty:
-                        geoms_to_process = list(laser_on_segments.geoms) if laser_on_segments.geom_type in ['MultiLineString', 'GeometryCollection'] else [laser_on_segments]
-                        for g in geoms_to_process:
-                            if g.geom_type in ['LineString', 'LinearRing']:
-                                segments_coords.append((float(g.coords[0][0]), float(g.coords[-1][0])))
-                            elif g.geom_type == 'Point':
-                                segments_coords.append((float(g.x) - 0.005, float(g.x) + 0.005))
-
-                if segments_coords:
-                    segments_coords.sort(key=lambda val: val[0])
-                    merged = []
-                    curr_start, curr_end = segments_coords[0]
-                    for start, end in segments_coords[1:]:
-                        if start <= curr_end: 
-                            curr_end = max(curr_end, end)
-                        else:
-                            merged.append((curr_start, curr_end))
-                            curr_start, curr_end = start, end
-                    merged.append((curr_start, curr_end))
-                    segments_coords = merged
-
+            for line_idx, (current_y, segments_coords) in enumerate(zip(scan_ys, all_segments)):
                 # Вычисляем истинные физические точки старта и финиша движения каретки станка (с вылетом overscan)
                 # Каретка выходит влево за пределы платы на overscan, и вправо на overscan
                 line_start_x = xmin - overscan
