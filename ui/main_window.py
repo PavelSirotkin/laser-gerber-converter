@@ -108,11 +108,13 @@ class LaserConverterApp(QtWidgets.QWidget):
         grid.addWidget(self.combo_laser_mode, 0, 1)
 
         self.spin_contour_power = self._spin(grid, 1, "Мощность для контура (S):", 0, 1000, 10)
-        self.spin_power = self._spin(grid, 2, "Макс. мощность лазера (S):", 1, 1000, 1000)
-        self.spin_feed = self._spin(grid, 3, "Скорость гравировки (мм/мин):", 1, 30000, 1500)
-        self.spin_step = self._spin(grid, 4, "Шаг строки / Луч (мм):", 0.001, 10.0, 0.1, 4, 0.01)
-        self.spin_overscan = self._spin(grid, 5, "Вылет каретки Overscan (мм):", 0.0, 50.0, 2.0, 1, 0.5)
-        self.spin_rotate = self._spin(grid, 6, "Точный поворот стола (град):", -360.0, 360.0, 0.0, 4, 0.01)
+        self.spin_contour_feed = self._spin(grid, 2, "Скорость контура (мм/мин):", 1, 30000, 1000)
+        self.spin_contour_feed.setToolTip("Скорость тестового обхода контура платы перед паузой M0")
+        self.spin_power = self._spin(grid, 3, "Макс. мощность лазера (S):", 1, 1000, 1000)
+        self.spin_feed = self._spin(grid, 4, "Скорость гравировки (мм/мин):", 1, 30000, 1500)
+        self.spin_step = self._spin(grid, 5, "Шаг строки / Луч (мм):", 0.001, 10.0, 0.1, 4, 0.01)
+        self.spin_overscan = self._spin(grid, 6, "Вылет каретки Overscan (мм):", 0.0, 50.0, 2.0, 1, 0.5)
+        self.spin_rotate = self._spin(grid, 7, "Точный поворот стола (град):", -360.0, 360.0, 0.0, 4, 0.01)
         self.left_layout.addWidget(self.param_group)
 
         # БЛОК 3: Режимы работы и зеркалирование
@@ -254,6 +256,7 @@ class LaserConverterApp(QtWidgets.QWidget):
         return {
             "laser_mode_idx": (self.combo_laser_mode, 0),
             "contour_power": (self.spin_contour_power, 10),
+            "contour_feed": (self.spin_contour_feed, 1000),
             "laser_power": (self.spin_power, 200),
             "feed_rate": (self.spin_feed, 1500),
             "raster_step": (self.spin_step, 0.1),
@@ -778,6 +781,7 @@ class LaserConverterApp(QtWidgets.QWidget):
             snake=self.cb_snake.isChecked(),
             laser_mode="M4" if self.combo_laser_mode.currentIndex() == 0 else "M3",
             contour_power=self.spin_contour_power.value(),
+            contour_feed=self.spin_contour_feed.value(),
         )
 
         try:

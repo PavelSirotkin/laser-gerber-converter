@@ -77,3 +77,14 @@ def test_burn_and_travel_segments_cover_scan_line():
         assert parts[0][0] == -2.0 and parts[-1][1] == 12.0
         assert all(a[1] == b[0] for a, b in zip(parts, parts[1:], strict=False))
     assert sum(b - a for _, a, b in tp.burn_segments) == pytest.approx(8.0 * 2)
+
+
+def test_contour_and_raster_feed_rates():
+    """Контур идет со «Скоростью контура», растр — со «Скоростью гравировки» (F модальный в GRBL)"""
+    geom = box(0, 0, 10, 1)
+    gcode = generate_gcode(geom, geom.bounds, GcodeParams(feedrate=1500, contour_feed=600)).gcode
+    feeds = [(i, int(m)) for i, ln in enumerate(gcode.splitlines()) for m in re.findall(r"F(\d+)", ln)]
+    lines = gcode.splitlines()
+    pause = lines.index("M0 ;")
+    assert [f for i, f in feeds if i < pause] == [600]
+    assert [f for i, f in feeds if i > pause] == [1500]

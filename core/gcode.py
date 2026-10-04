@@ -15,6 +15,7 @@ class GcodeParams:
     snake: bool = True  # сканирование змейкой
     laser_mode: str = "M4"  # "M4" (динамическая мощность) или "M3"
     contour_power: int = 10  # мощность тестового обхода контура S
+    contour_feed: int = 1000  # скорость тестового обхода контура, мм/мин
 
 
 @dataclass
@@ -37,7 +38,7 @@ def generate_gcode(burn_geom, bounds, params):
     # --- ТЕСТОВЫЙ ОБХОД КОНТУРА ПЛАТЫ СТАНОЧНЫМ ЛУЧОМ ---
     gcode.append("M3 S0;")
     # Замкнутый прямоугольник по габаритам платы (без overscan — это зона разгона, а не плата)
-    gcode.append(f"G1 X{xmin:.4f} Y{ymin:.4f} F1000 S0")
+    gcode.append(f"G1 X{xmin:.4f} Y{ymin:.4f} F{p.contour_feed} S0")
     gcode.append(f"G1 X{xmax:.4f} Y{ymin:.4f} S{p.contour_power}")
     gcode.append(f"G1 X{xmax:.4f} Y{ymax:.4f}")
     gcode.append(f"G1 X{xmin:.4f} Y{ymax:.4f}")
