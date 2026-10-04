@@ -9,6 +9,7 @@ import random
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from core.calibration import decompose_affine
 from core.simulator import MachineConfig, VirtualMachine
 from ui.qt_paths import shapely_to_qt_paths
 from ui.view import LaserGraphicsView
@@ -133,6 +134,12 @@ class SimulatorWindow(QtWidgets.QWidget):
         grid.addWidget(btn_new, 6, 1)
         form.addWidget(machine_group)
 
+        # Истинное положение платы — то, что калибровка в основном окне должна «угадать»
+        self.pose_label = QtWidgets.QLabel()
+        self.pose_label.setWordWrap(True)
+        self.pose_label.setStyleSheet("color: #6a1b9a;")
+        form.addWidget(self.pose_label)
+
         aim_group = QtWidgets.QGroupBox("ЛКМ наводит")
         aim_layout = QtWidgets.QHBoxLayout(aim_group)
         self.rb_aim_camera = QtWidgets.QRadioButton("камеру")
@@ -210,6 +217,12 @@ class SimulatorWindow(QtWidgets.QWidget):
             mirror_x=self.cb_mirror.isChecked(),
         )
         self._build_scene()
+        pose = decompose_affine(self.vm.board_to_table)
+        self.pose_label.setText(
+            f"Истинная укладка: поворот {pose['angle']:+.3f}°, масштаб {pose['scale_x']:.4f}"
+            + (", зеркально" if pose["mirrored"] else "")
+            + "\n(сравните с результатом калибровки в основном окне)"
+        )
         self.report_label.setText("Прожиг: рассчитайте траекторию в основном окне.")
         self._update_dro()
 
