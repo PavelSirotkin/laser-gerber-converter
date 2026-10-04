@@ -84,7 +84,7 @@ pip install PyQt6 numpy shapely gerbyx
 <details>
   <summary>📷 Посмотреть скриншот</summary>
 
-  ![gbr](gbr.png "gbr")
-  ![gcode](gcode.png "gbr")
+  ![gbr](docs/images/gbr.png "gbr")
+  ![gcode](docs/images/gcode.png "gcode")
 
 </details>
