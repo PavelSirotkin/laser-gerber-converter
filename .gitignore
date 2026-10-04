@@ -5,3 +5,4 @@ venv
 *.gcode
 .vscode
 .continue
+__pycache__

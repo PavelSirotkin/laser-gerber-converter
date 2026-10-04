@@ -9,7 +9,7 @@ from gerbyx.tokenizer import tokenize_gerber
 from gerbyx.parser import GerberParser
 from gerbyx.processor import GerberProcessor
 
-from shapely.geometry import LineString, Polygon, MultiPolygon, Point
+from shapely.geometry import LineString, Polygon, MultiPolygon, Point, box
 from shapely.affinity import rotate, scale, translate, affine_transform
 from shapely.ops import unary_union
 
@@ -51,7 +51,41 @@ class GerberGeometryContext:
             max(b[3] for b in bounds)
         )
 
-    def get_transformed_elements(self, for_gcode=False):
+    def get_burn_geometry(self, invert=False):
+        """Итоговая геометрия прожига в координатах станка — единый источник для превью и G-кода.
+        Возвращает (геометрия, (xmin, ymin, xmax, ymax)) или (None, None)."""
+        elements = self.get_transformed_elements()
+        if not elements:
+            return None, None
+        merged = unary_union(elements)
+        bounds = merged.bounds
+        if invert:
+            merged = box(*bounds).difference(merged)
+        return merged, bounds
+
+    def local_to_display(self, x, y):
+        """Точка в локальных координатах платы (после зеркал/поворота, прижата к 0,0) -> координаты экрана/станка"""
+        if self.use_calibration and self.matrix_coeffs:
+            m11, m21, m12, m22, dx, dy = self.matrix_coeffs
+            return m11 * x + m21 * y + dx, m12 * x + m22 * y + dy
+        if self.use_camera_offset:
+            return x + self.camera_offset_x, y + self.camera_offset_y
+        return x, y
+
+    def display_to_local(self, x, y):
+        """Обратное преобразование: координаты экрана/станка -> локальные координаты платы"""
+        if self.use_calibration and self.matrix_coeffs:
+            m11, m21, m12, m22, dx, dy = self.matrix_coeffs
+            det = m11 * m22 - m21 * m12
+            if abs(det) < 1e-12:
+                raise ValueError("Матрица калибровки вырождена — точки лежат на одной прямой?")
+            px, py = x - dx, y - dy
+            return (m22 * px - m21 * py) / det, (-m12 * px + m11 * py) / det
+        if self.use_camera_offset:
+            return x - self.camera_offset_x, y - self.camera_offset_y
+        return x, y
+
+    def get_transformed_elements(self):
         """Возвращает массив геометрий со всеми примененными смещениями."""
         if not self.raw_geometries:
             return []
@@ -95,6 +129,109 @@ class GerberGeometryContext:
             transformed.append(geom)
             
         return transformed
+
+
+def _collect_edges(geom):
+    """Все ребра полигонов (x1, y1, x2, y2) и прочие (неплощадные) части геометрии"""
+    edges, others = [], []
+
+    def walk(g):
+        if g.is_empty:
+            return
+        if g.geom_type == 'Polygon':
+            for ring in (g.exterior, *g.interiors):
+                c = np.asarray(ring.coords, dtype=float)[:, :2]
+                edges.append(np.hstack([c[:-1], c[1:]]))
+        elif hasattr(g, 'geoms'):
+            for sub in g.geoms:
+                walk(sub)
+        else:
+            others.append(g)
+
+    walk(geom)
+    edges = np.vstack(edges) if edges else np.zeros((0, 4))
+    return edges, others
+
+
+def scanline_intervals(geom, ys, x_from, x_to):
+    """Отрезки прожига [(x_start, x_end), ...] для каждой строки Y.
+    Пересечения строки с ребрами полигонов считаются векторно (правило even-odd — корректно,
+    т.к. после unary_union дырки являются настоящими interiors). Линии/точки нулевой ширины
+    обрабатываются через shapely, как раньше."""
+    edges, others = _collect_edges(geom)
+    x1, y1, x2, y2 = edges.T if len(edges) else (np.zeros(0),) * 4
+    lo, hi = np.minimum(y1, y2), np.maximum(y1, y2)
+    order = np.argsort(lo)
+    x1, y1, x2, y2, lo, hi = (a[order] for a in (x1, y1, x2, y2, lo, hi))
+
+    def crossings(y):
+        n = np.searchsorted(lo, y, side='right')  # ребра, начинающиеся не выше строки
+        sel = hi[:n] > y                           # полуоткрытый интервал [lo, hi) — вершины не считаются дважды
+        if not sel.any():
+            return []
+        ex1, ey1, ex2, ey2 = x1[:n][sel], y1[:n][sel], x2[:n][sel], y2[:n][sel]
+        xs = np.sort(ex1 + (y - ey1) * (ex2 - ex1) / (ey2 - ey1))
+        return [(float(a), float(b)) for a, b in zip(xs[0::2], xs[1::2]) if b > a]
+
+    # Строка может пройти ровно по горизонтальному ребру (координаты Gerber часто на той же сетке).
+    # Граница считается частью фигуры, как в shapely: объединяем срезы чуть ниже и чуть выше строки.
+    eps = 1e-7
+    result = []
+    for y in ys:
+        segs = crossings(y - eps) + crossings(y + eps)
+
+        if others:
+            scan_line = LineString([(x_from, y), (x_to, y)])
+            for g in others:
+                hit = scan_line.intersection(g)
+                for part in getattr(hit, 'geoms', [hit]):
+                    if part.is_empty:
+                        continue
+                    if part.geom_type == 'Point':
+                        segs.append((part.x - 0.005, part.x + 0.005))
+                    elif part.geom_type == 'LineString':
+                        xa, xb = part.coords[0][0], part.coords[-1][0]
+                        segs.append((min(xa, xb), max(xa, xb)))
+
+        # Слияние перекрывающихся отрезков
+        segs.sort()
+        merged = []
+        for a, b in segs:
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        result.append(merged)
+    return result
+
+
+def _ring_to_qpolygon(coords):
+    """Кольцо Shapely -> QPolygonF (ось Y переворачивается: в сцене Qt Y направлен вниз)"""
+    return QtGui.QPolygonF([QtCore.QPointF(x, -y) for x, y, *_ in coords])
+
+
+def shapely_to_qt_paths(geom):
+    """Shapely-геометрия в координатах станка -> (путь заливки полигонов, путь линий) для сцены Qt"""
+    fill_path = QtGui.QPainterPath()
+    fill_path.setFillRule(QtCore.Qt.FillRule.OddEvenFill)
+    line_path = QtGui.QPainterPath()
+
+    def walk(g):
+        if g.is_empty:
+            return
+        if g.geom_type == 'Polygon':
+            # После unary_union дырки — настоящие interiors, поэтому OddEven здесь корректен
+            fill_path.addPolygon(_ring_to_qpolygon(g.exterior.coords))
+            for interior in g.interiors:
+                fill_path.addPolygon(_ring_to_qpolygon(interior.coords))
+        elif g.geom_type in ('LineString', 'LinearRing'):
+            line_path.addPolygon(_ring_to_qpolygon(g.coords))
+        elif hasattr(g, 'geoms'):
+            for sub in g.geoms:
+                walk(sub)
+
+    walk(geom)
+    return fill_path, line_path
 
 
 class CrosshairOverlay(QtWidgets.QWidget):
@@ -732,13 +869,9 @@ class LaserConverterApp(QtWidgets.QWidget):
 
         if not is_active:
             self.use_calibration = False
-            for marker in self.manual_markers:
-                if marker:
-                    try: self.view.scene.removeItem(marker)
-                    except: pass
             self.manual_file_pts = [None, None, None, None]
             self.manual_mach_pts = [None, None, None, None]
-            self.manual_markers = [None, None, None, None]
+            self.redraw_calibration_markers()
 
             if hasattr(self, 'btn_pt1'): self.btn_pt1.setText("Зафиксировать Точку 1")
             if hasattr(self, 'btn_pt2'): self.btn_pt2.setText("Зафиксировать Точку 2")
@@ -760,12 +893,9 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.btn_pt4.setEnabled(is_active)
 
         if not is_active:
-            if self.manual_markers[3]:
-                try: self.view.scene.removeItem(self.manual_markers[3])
-                except: pass
             self.manual_file_pts[3] = None
             self.manual_mach_pts[3] = None
-            self.manual_markers[3] = None
+            self.redraw_calibration_markers()
             self.btn_pt4.setText("Зафиксировать Точку 4")
             self.btn_pt4.setStyleSheet("")
 
@@ -788,24 +918,15 @@ class LaserConverterApp(QtWidgets.QWidget):
         cam_x = self.spin_cam_offset_x.value() if (is_camera_active and hasattr(self, 'spin_cam_offset_x')) else 0.0
         cam_y = self.spin_cam_offset_y.value() if (is_camera_active and hasattr(self, 'spin_cam_offset_y')) else 0.0
 
-        # Чистые локальные координаты точки относительно угла платы (в попугаях для МНК)
-        exact_file_x = scene_x - cam_x
-        exact_file_y = (-scene_y) - cam_y
-
-        # Сохраняем скрытые координаты для МНК
-        self.manual_file_pts[point_idx] = (exact_file_x, exact_file_y)
-        
-        if self.manual_markers[point_idx]:
-            try: self.view.scene.removeItem(self.manual_markers[point_idx])
-            except: pass
-
-        colors = ["#ff1744", "#2979ff", "#00e676", "#e040fb"]
-        marker = QtWidgets.QGraphicsEllipseItem(scene_x - 0.4, scene_y - 0.4, 0.8, 0.8)
-        marker.setBrush(QtGui.QBrush(QtGui.QColor(colors[point_idx])))
-        marker.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.15))
-
-        self.view.scene.addItem(marker)
-        self.manual_markers[point_idx] = marker
+        # Локальные координаты точки на плате для МНК. Экран может показывать плату как со
+        # смещением камеры, так и уже с примененной калибровкой — снимаем ровно то, что на экране.
+        self.sync_geometry_context()
+        try:
+            self.manual_file_pts[point_idx] = self.geo_context.display_to_local(scene_x, -scene_y)
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "Внимание", str(e))
+            return
+        self.redraw_calibration_markers()
         self.status_label.setText(f"Статус: Точка {point_idx + 1} зафиксирована в прицеле.")
         self.status_label.setStyleSheet("color: #0288d1;")
 
@@ -843,9 +964,9 @@ class LaserConverterApp(QtWidgets.QWidget):
             spin_y.installEventFilter(self)
             grid.addWidget(spin_y, 1, 1)
 
-            # Ваша автоматическая подстановка для тестирования (+10 мм)
-            spin_x.setValue(scene_x + 10)
-            spin_y.setValue(-scene_y + 10)
+            # Подставляем координаты прицела как стартовое значение
+            spin_x.setValue(scene_x)
+            spin_y.setValue(-scene_y)
 
             # Чекбокс автоматического добавления смещения камеры
             cb_add_cam = QtWidgets.QCheckBox("Учитывать смещение камеры при вводе")
@@ -867,7 +988,7 @@ class LaserConverterApp(QtWidgets.QWidget):
                     mach_x += cam_x
                     mach_y += cam_y
 
-                self.manual_mach_pts[point_idx] = (mach_x, mach_y)
+                self.manual_mach_pts[point_idx] = (mach_x, mach_y, cb_add_cam.isChecked())
                 
                 cam_label = " (+Камера)" if cb_add_cam.isChecked() else ""
                 buttons[point_idx].setText(f"Т{point_idx + 1}: Сетка({scene_x:.4f}, {-scene_y:.4f}) -> Ст({mach_x:.4f}, {mach_y:.4f}){cam_label}")
@@ -880,11 +1001,8 @@ class LaserConverterApp(QtWidgets.QWidget):
                 if p1_3_ready and p4_ready:
                     self.calculate_manual_affine_matrix()
             else:
-                if self.manual_markers[point_idx]:
-                    try: self.view.scene.removeItem(self.manual_markers[point_idx])
-                    except: pass
                 self.manual_file_pts[point_idx] = None
-                self.manual_markers[point_idx] = None
+                self.redraw_calibration_markers()
                 buttons[point_idx].setText(f"Зафиксировать Точку {point_idx + 1}")
                 buttons[point_idx].setStyleSheet("")
         except Exception as e:
@@ -893,6 +1011,32 @@ class LaserConverterApp(QtWidgets.QWidget):
             print("="*105 + "\n")
             QtWidgets.QMessageBox.critical(self, "Ошибка", f"Сбой работы окна ввода: {str(e)}")
 
+
+    def redraw_calibration_markers(self):
+        """Рисует отметки реперов по их локальным координатам платы в текущей системе экрана.
+        После расчета матрицы отметки должны лечь точно на реперы — это визуальная проверка калибровки."""
+        for marker in self.manual_markers:
+            try:
+                if marker is not None and marker.scene() is self.view.scene:
+                    self.view.scene.removeItem(marker)
+            except RuntimeError:
+                pass  # объект уже удален вместе со scene.clear()
+        self.manual_markers = [None, None, None, None]
+        if not self.geo_context or not self.cb_enable_calib.isChecked():
+            return
+
+        self.sync_geometry_context()
+        colors = ["#ff1744", "#2979ff", "#00e676", "#e040fb"]
+        for idx, pt in enumerate(self.manual_file_pts):
+            if pt is None:
+                continue
+            x, y = self.geo_context.local_to_display(*pt)
+            marker = QtWidgets.QGraphicsEllipseItem(x - 0.4, -y - 0.4, 0.8, 0.8)
+            marker.setBrush(QtGui.QBrush(QtGui.QColor(colors[idx])))
+            marker.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.15))
+            marker.setZValue(10)
+            self.view.scene.addItem(marker)
+            self.manual_markers[idx] = marker
 
     def calculate_manual_affine_matrix(self):
         """Расчет аффинной матрицы, автоматически адаптирующийся под 3 или 4 точки методом МНК"""
@@ -913,6 +1057,12 @@ class LaserConverterApp(QtWidgets.QWidget):
             for idx in range(len(valid_indices)):
                 A[idx] = [x_f[idx], y_f[idx], 1]
 
+            if np.linalg.matrix_rank(A, tol=1e-6) < 3:
+                QtWidgets.QMessageBox.warning(self, "Внимание",
+                    "Точки совпадают или лежат на одной прямой — калибровка невозможна.\n"
+                    "Перезафиксируйте точки, разнеся их по площади платы.")
+                return
+
             res_x = np.linalg.lstsq(A, X_m, rcond=None)[0]
             res_y = np.linalg.lstsq(A, Y_m, rcond=None)[0]
 
@@ -926,13 +1076,6 @@ class LaserConverterApp(QtWidgets.QWidget):
             pts_count = len(valid_indices)
             self.status_label.setText(f"Статус: Базирование выполнено успешно по {pts_count} точкам!")
             self.status_label.setStyleSheet("color: green; font-weight: bold;")
-
-            # Очищаем временные маркеры фиксации
-            for marker in self.manual_markers:
-                if marker:
-                    try: self.view.scene.removeItem(marker)
-                    except: pass
-            self.manual_markers = [None, None, None, None]
 
             self.update_interactive_preview()
 
@@ -964,147 +1107,54 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.use_calibration = False
 
     def update_interactive_preview(self):
-        """Интерактивное обновление экрана превью векторов с использованием ООП-контекста"""
+        """Интерактивное превью. Рисует ту же геометрию, что пойдет в G-код (единый конвейер трансформаций)"""
         if not self.geo_context: return
         self.sync_geometry_context()
         ovr = self.spin_overscan.value()
         inv_mode = self.cb_invert.isChecked()
-        rot_ang = self.spin_rotate.value()
 
         try:
             self.view.scene.clear()
-            qt_path = QtGui.QPainterPath()
-            qt_path.setFillRule(QtCore.Qt.FillRule.OddEvenFill)
+            self.manual_markers = [None, None, None, None]
 
             rx_min, ry_min, rx_max, ry_max = self.geo_context.get_raw_bounds()
-            w, h = rx_max - rx_min, ry_max - ry_min
-            if w <= 0 or h <= 0: return
+            if rx_max - rx_min <= 0 or ry_max - ry_min <= 0: return
 
-            cam_x = self.spin_cam_offset_x.value() if (hasattr(self, 'cb_use_camera_offset') and self.cb_use_camera_offset.isChecked()) else 0.0
-            cam_y = self.spin_cam_offset_y.value() if (hasattr(self, 'cb_use_camera_offset') and self.cb_use_camera_offset.isChecked()) else 0.0
+            burn_geom, bounds = self.geo_context.get_burn_geometry(invert=inv_mode)
+            if burn_geom is None: return
+            min_x, _, max_x, _ = bounds
 
-            # Шаг 1: Перенос сырой геометрии Gerber в qt_path, прижимая к (0,0) платы
-            def add_raw_to_qt_path(g_item):
-                if g_item.is_empty: return
-                if g_item.geom_type == 'Polygon':
-                    x_ext = np.array(g_item.exterior.xy[0], dtype=float) - rx_min
-                    y_ext = np.array(g_item.exterior.xy[1], dtype=float) - ry_min
-                    poly_path = QtGui.QPainterPath()
-                    poly_path.moveTo(float(x_ext[0]), float(y_ext[0]))
-                    for x, y in zip(x_ext[1:], y_ext[1:]): poly_path.lineTo(float(x), float(y))
-                    poly_path.closeSubpath()
+            fill_path, line_path = shapely_to_qt_paths(burn_geom)
+            color = QtGui.QColor("#1565c0" if inv_mode else "#2e7d32")
 
-                    for interior in g_item.interiors:
-                        x_int = np.array(interior.xy[0], dtype=float) - rx_min
-                        y_int = np.array(interior.xy[1], dtype=float) - ry_min
-                        int_path = QtGui.QPainterPath()
-                        int_path.moveTo(float(x_int[0]), float(y_int[0]))
-                        for x, y in zip(x_int[1:], y_int[1:]): int_path.lineTo(float(x), float(y))
-                        int_path.closeSubpath()
-                        poly_path = poly_path.subtracted(int_path)
-                    qt_path.addPath(poly_path)
+            fill_item = QtWidgets.QGraphicsPathItem(fill_path)
+            fill_item.setCacheMode(QtWidgets.QGraphicsItem.CacheMode.DeviceCoordinateCache)
+            fill_item.setBrush(QtGui.QBrush(color))
+            fill_item.setPen(QtGui.QPen(QtCore.Qt.PenStyle.NoPen))
+            self.view.scene.addItem(fill_item)
 
-                elif g_item.geom_type in ['MultiPolygon', 'GeometryCollection']:
-                    for sub_geom in g_item.geoms: add_raw_to_qt_path(sub_geom)
-                elif g_item.geom_type in ['LineString', 'LinearRing']:
-                    x_l = np.array(g_item.xy[0], dtype=float) - rx_min
-                    y_l = np.array(g_item.xy[1], dtype=float) - ry_min
-                    line_path = QtGui.QPainterPath()
-                    line_path.moveTo(float(x_l[0]), float(y_l[0]))
-                    for x, y in zip(x_l[1:], y_l[1:]): line_path.lineTo(float(x), float(y))
-                    qt_path.addPath(line_path)
-
-            for geom in self.geo_context.raw_geometries: add_raw_to_qt_path(geom)
-
-            path_item = QtWidgets.QGraphicsPathItem(qt_path)
-            path_item.setCacheMode(QtWidgets.QGraphicsItem.CacheMode.DeviceCoordinateCache)
-            path_item.setBrush(QtGui.QBrush(QtGui.QColor("#1565c0" if inv_mode else "#2e7d32")))
-            
-            # ЖЕЛЕЗНОЕ ИСПРАВЛЕНИЕ: Раздельный синтаксис пера для маски и обычного режима
-            if inv_mode:
-                path_item.setPen(QtGui.QPen(QtCore.Qt.PenStyle.NoPen))
-            else:
-                path_item.setPen(QtGui.QPen(QtGui.QColor("#2e7d32"), 0.1))
-
-
-            # Шаг 2: АППАРАТНАЯ МАТРИЦА ТРАНСФОРМАЦИИ СЛОЯ (Ручной поворот UI)
-            final_transform = QtGui.QTransform()
-            fx = -1.0 if self.cb_flip_x.isChecked() else 1.0
-            fy = -1.0 if self.cb_flip_y.isChecked() else 1.0
-            
-            final_transform.translate(w / 2.0, h / 2.0)
-            final_transform.scale(fx, fy)
-            if rot_ang != 0.0: final_transform.rotate(rot_ang)
-            final_transform.translate(-w / 2.0, -h / 2.0)
-
-            # Выравниваем ручной поворот в локальный ноль
-            pts_ui = [final_transform.map(QtCore.QPointF(0,0)), final_transform.map(QtCore.QPointF(w,0)),
-                      final_transform.map(QtCore.QPointF(w,h)), final_transform.map(QtCore.QPointF(0,h))]
-            align_tr = QtGui.QTransform()
-            align_tr.translate(-min(p.x() for p in pts_ui), -min(p.y() for p in pts_ui))
-            final_transform = final_transform * align_tr
-
-            # Шаг 3: Наложение абсолютных координат ЧПУ станка (МНК калибровка)
-            curr_dx, current_dy = 0.0, 0.0
-            if hasattr(self, 'cb_enable_calib') and self.cb_enable_calib.isChecked() and self.use_calibration and self.matrix_coeffs:
-                m11, m21, m12, m22, dx, dy = self.matrix_coeffs
-                curr_dx, current_dy = dx, dy
-                mach_transform = QtGui.QTransform(m11, m12, m21, m22, dx, dy)
-                qt_y_flip = QtGui.QTransform(1.0, 0.0, 0.0, -1.0, 0.0, 0.0)
-                final_transform = final_transform * mach_transform * qt_y_flip
-            else:
-                qt_y_flip = QtGui.QTransform(1.0, 0.0, 0.0, -1.0, cam_x, -cam_y)
-                final_transform = final_transform * qt_y_flip
-
-            # Итоговый просчет станочных габаритов (после применения ВСЕХ матриц)
-            pts_final = [final_transform.map(QtCore.QPointF(0,0)), final_transform.map(QtCore.QPointF(w,0)),
-                         final_transform.map(QtCore.QPointF(w,h)), final_transform.map(QtCore.QPointF(0,h))]
-            min_x, min_y = min(p.x() for p in pts_final), min(p.y() for p in pts_final)
-            rot_w = max(p.x() for p in pts_final) - min_x
-            rot_h = max(p.y() for p in pts_final) - min_y
-
-            # Отрисовка симметричной маски инверсии строго в станочных координатах
-            if inv_mode:
-                mask_path = QtGui.QPainterPath()
-                mask_path.setFillRule(QtCore.Qt.FillRule.OddEvenFill)
-                mask_path.addRect(QtCore.QRectF(min_x - ovr, min_y, rot_w + (2 * ovr), rot_h))
-                mask_path = mask_path.subtracted(final_transform.map(qt_path))
-                path_item.setPath(mask_path)
-                path_item.setTransform(QtGui.QTransform())
-            else:
-                path_item.setTransform(final_transform)
-
-            self.view.scene.addItem(path_item)
+            if not line_path.isEmpty():
+                line_item = QtWidgets.QGraphicsPathItem(line_path)
+                line_item.setPen(QtGui.QPen(color, 0))
+                self.view.scene.addItem(line_item)
 
             home_marker = QtWidgets.QGraphicsEllipseItem(-0.6, -0.6, 1.2, 1.2)
             home_marker.setBrush(QtGui.QBrush(QtGui.QColor("#ff0000")))
             home_marker.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.2))
             self.view.scene.addItem(home_marker)
+            self.redraw_calibration_markers()
 
-            # --- ИСПРАВЛЕНО: Расчет абсолютного диапазона хода каретки на столе ЧПУ ---
-            display_w, display_h = (rx_max - rx_min), (ry_max - ry_min)
-            
-            # Находим, где физически на координатной сетке станка начинается и заканчивается ПЛАТА
-            board_start_x = min_x
-            board_end_x = min_x + rot_w
-
-            # Вычисляем абсолютные координаты ЧПУ (DRO), между которыми будет физически летать башка станка
-            # Слева каретка вылетает до точки (board_start_x - overscan)
-            # Справа каретка долетает тормозить до точки (board_end_x + overscan)
-            machine_g0_start_x = board_start_x - ovr
-            machine_g0_end_x = board_end_x + ovr
-
-            # Выводим оператору абсолютно честные физические координаты линеек станка
+            # Выводим оператору физические координаты линеек станка
             self.status_label.setText((
                 f"Статус: Геометрия готова.\n"
-                f"Размер из файла: {display_w:.2f} x {display_h:.2f} мм\n"
-                f"Размер маски платы (на станке): {board_start_x:.2f} ... {board_end_x:.2f} мм\n"
-                f"Габарит хода башки X (ЧПУ DRO): [ {machine_g0_start_x:.2f} ... {machine_g0_end_x:.2f} ] мм"
+                f"Размер из файла: {rx_max - rx_min:.2f} x {ry_max - ry_min:.2f} мм\n"
+                f"Размер маски платы (на станке): {min_x:.2f} ... {max_x:.2f} мм\n"
+                f"Габарит хода башки X (ЧПУ DRO): [ {min_x - ovr:.2f} ... {max_x + ovr:.2f} ] мм"
             ))
             self.status_label.setStyleSheet("color: #2e7d32; font-weight: bold;")
 
         except Exception as e:
-            print("\n" + "="*40 + " ОШИБКА АППАРАТНОГО ПРЕВЬЮ " + "="*40)
+            print("\n" + "="*40 + " ОШИБКА ПРЕВЬЮ " + "="*40)
             traceback.print_exc()
             self.status_label.setText(f"Ошибка визуализации: {str(e)}")
             self.status_label.setStyleSheet("color: red;")
@@ -1139,25 +1189,9 @@ class LaserConverterApp(QtWidgets.QWidget):
 
             # Получаем геометрию платы. 
             # В обычном режиме она прижата к (0,0). В режиме 3 точек — она в абсолютных координатах станка.
-            transformed_elements = self.geo_context.get_transformed_elements(for_gcode=True)
-            if not transformed_elements: return
-
-            t_bounds = [g.bounds for g in transformed_elements]
-            xmin = float(min([b[0] for b in t_bounds]))
-            ymin = float(min([b[1] for b in t_bounds]))
-            xmax = float(max([b[2] for b in t_bounds]))
-            ymax = float(max([b[3] for b in t_bounds]))
-
-            moved_geometries = []
-            if invert_mode:
-                bounding_box = Polygon([(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)])
-                final_mask = bounding_box
-                for geom in transformed_elements:
-                    final_mask = final_mask.difference(geom)
-                moved_geometries.append(final_mask)
-            else:
-                merged_pads = unary_union(transformed_elements)
-                moved_geometries.append(merged_pads)
+            burn_geom, bounds = self.geo_context.get_burn_geometry(invert=invert_mode)
+            if burn_geom is None: return
+            xmin, ymin, xmax, ymax = (float(v) for v in bounds)
 
             gcode = []
             gcode.append("; Gerber -> LaserGRBL GCode (Real-Space OOP-Engine)")
@@ -1166,11 +1200,12 @@ class LaserConverterApp(QtWidgets.QWidget):
             # --- ТЕСТОВЫЙ ОБХОД КОНТУРА ПЛАТЫ СТАНОЧНЫМ ЛУЧОМ ---
             contour_s = self.spin_contour_power.value()
             gcode.append(f"M3 S0;")
+            # Замкнутый прямоугольник по габаритам платы (без overscan — это зона разгона, а не плата)
             gcode.append(f"G1 X{xmin:.4f} Y{ymin:.4f} F1000 S0")
-            gcode.append(f"G1 X{(xmax + overscan):.4f} Y{ymin:.4f} S{contour_s}")
-            gcode.append(f"G1 X{(xmax + overscan):.4f} Y{ymax:.4f}")
-            gcode.append(f"G1 X{(xmin - overscan):.4f} Y{ymax:.4f}")
-            gcode.append(f"G1 X{(xmin - overscan):.4f} Y{ymin:.4f}")
+            gcode.append(f"G1 X{xmax:.4f} Y{ymin:.4f} S{contour_s}")
+            gcode.append(f"G1 X{xmax:.4f} Y{ymax:.4f}")
+            gcode.append(f"G1 X{xmin:.4f} Y{ymax:.4f}")
+            gcode.append(f"G1 X{xmin:.4f} Y{ymin:.4f}")
             gcode.append("M5\nG4 P0.5\nM0 ;")
 
             gcode.append(f"{selected_mode_txt} S0\nG1 F{feedrate}")
@@ -1182,41 +1217,12 @@ class LaserConverterApp(QtWidgets.QWidget):
             blue_laser_path = QtGui.QPainterPath()
             red_overscan_path = QtGui.QPainterPath()
 
-            for line_idx in range(lines_count):
-                current_y = ymin + (line_idx * step) + (step / 2.0)
-                if current_y > ymax: current_y = ymax
+            scan_ys = [min(ymin + (i * step) + (step / 2.0), ymax) for i in range(lines_count)]
+            self.status_label.setText(f"Расчет пересечений: {lines_count} строк...")
+            QtWidgets.QApplication.processEvents()
+            all_segments = scanline_intervals(burn_geom, scan_ys, xmin - 0.5, xmax + 0.5)
 
-                if line_idx % 200 == 0:
-                    self.status_label.setText(f"Расчет: строка {line_idx} из {lines_count}...")
-                    QtWidgets.QApplication.processEvents()
-
-                # Сканируем линию строго в пределах физических границ платы
-                scan_line = LineString([(xmin - 0.5, current_y), (xmax + 0.5, current_y)])
-                segments_coords = []
-
-                for target_geom in moved_geometries:
-                    laser_on_segments = scan_line.intersection(target_geom)
-                    if not laser_on_segments.is_empty:
-                        geoms_to_process = list(laser_on_segments.geoms) if laser_on_segments.geom_type in ['MultiLineString', 'GeometryCollection'] else [laser_on_segments]
-                        for g in geoms_to_process:
-                            if g.geom_type in ['LineString', 'LinearRing']:
-                                segments_coords.append((float(g.coords[0][0]), float(g.coords[-1][0])))
-                            elif g.geom_type == 'Point':
-                                segments_coords.append((float(g.x) - 0.005, float(g.x) + 0.005))
-
-                if segments_coords:
-                    segments_coords.sort(key=lambda val: val[0])
-                    merged = []
-                    curr_start, curr_end = segments_coords[0]
-                    for start, end in segments_coords[1:]:
-                        if start <= curr_end: 
-                            curr_end = max(curr_end, end)
-                        else:
-                            merged.append((curr_start, curr_end))
-                            curr_start, curr_end = start, end
-                    merged.append((curr_start, curr_end))
-                    segments_coords = merged
-
+            for line_idx, (current_y, segments_coords) in enumerate(zip(scan_ys, all_segments)):
                 # Вычисляем истинные физические точки старта и финиша движения каретки станка (с вылетом overscan)
                 # Каретка выходит влево за пределы платы на overscan, и вправо на overscan
                 line_start_x = xmin - overscan
@@ -1230,7 +1236,7 @@ class LaserConverterApp(QtWidgets.QWidget):
                 # ГЕНЕРАЦИЯ ТРАЕКТОРИИ И КРАСНЫХ ХОДОВ ОВЕРСКАНА
                 if direction_right or not snake_mode:
                     # Движение слева направо: стартуем из левой точки разгона
-                    gcode.append(f"G0 X{line_start_x:.4f} Y{current_y:.4f}")
+                    gcode.append(f"G1 X{line_start_x:.4f} Y{current_y:.4f} S0")
                     red_overscan_path.moveTo(line_start_x, -current_y)
 
                     last_x = line_start_x
@@ -1248,7 +1254,7 @@ class LaserConverterApp(QtWidgets.QWidget):
                         red_overscan_path.lineTo(line_end_x, -current_y)
                 else:
                     # Движение справа налево (режим змейки): стартуем из правой точки разгона
-                    gcode.append(f"G0 X{line_end_x:.4f} Y{current_y:.4f}")
+                    gcode.append(f"G1 X{line_end_x:.4f} Y{current_y:.4f} S0")
                     red_overscan_path.moveTo(line_end_x, -current_y)
 
                     last_x = line_end_x
@@ -1268,7 +1274,7 @@ class LaserConverterApp(QtWidgets.QWidget):
                 if snake_mode: 
                     direction_right = not direction_right
 
-            gcode.append(f"M5\nG0 X0.000 Y0.000\nM2")
+            gcode.append(f"M5\nG1 X0.000 Y0.000 S0\nM2")
             self.generated_gcode = "\n".join(gcode)
             self.view.scene.clear()
             self.view.setBackgroundBrush(QtGui.QColor("#f0f0f0"))
