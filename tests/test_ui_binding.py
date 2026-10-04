@@ -140,7 +140,8 @@ def test_reset_points_clears_binding(qapp, accept_dialogs):
     assert w.use_calibration
     w.reset_points()
     assert not w.use_calibration and w.matrix_coeffs is None
-    assert w.settings.value("calib_matrix_active") == "false"
+    assert w.manual_file_pts == [None] * 4 and w.manual_mach_pts == [None] * 4
+    assert w.btn_pt1.text() == "Зафиксировать Точку 1"
 
 
 def test_camera_offset_does_not_shift_drawing(qapp):
@@ -198,18 +199,41 @@ def test_settings_autosave_and_restore(qapp):
     assert w2.spin_cam_offset_x.value() == pytest.approx(CAMERA[0])
 
 
-def test_binding_restored_from_previous_session(qapp, accept_dialogs):
+def test_binding_not_restored_after_restart(qapp, accept_dialogs):
+    """Плата на столе каждый раз лежит по-новому: при новом запуске точки привязки начинаются с нуля,
+    а остатки привязки прошлых версий в INI удаляются"""
     from ui.main_window import LaserConverterApp
 
     sim = make_simulator(seed=11, rotation=4.0)
     w = make_window(qapp, sim)
     capture_fiducials(qapp, w, sim, [0, 3])
-    coeffs = w.matrix_coeffs
+    assert w.use_calibration
+    w.settings.setValue("calib_matrix_active", "true")  # как писали прежние версии
+    w.settings.setValue("pt_file_0_x", 1.0)
+    w.settings.sync()
 
     w2 = LaserConverterApp()
-    assert w2.use_calibration
-    assert w2.matrix_coeffs == pytest.approx(coeffs)
-    assert w2.manual_mach_pts[1] is not None and w2.manual_mach_pts[2] is None
+    assert not w2.use_calibration and w2.matrix_coeffs is None
+    assert w2.manual_file_pts == [None] * 4 and w2.manual_mach_pts == [None] * 4
+    assert w2.settings.value("calib_matrix_active") is None and w2.settings.value("pt_file_0_x") is None
+
+
+def test_loading_new_gerber_clears_points(qapp, accept_dialogs):
+    sim = make_simulator(seed=11, rotation=4.0)
+    w = make_window(qapp, sim)
+    capture_fiducials(qapp, w, sim, [0, 3])
+    w.process_conversion()
+    assert w.use_calibration and w.generated_gcode
+
+    w.load_gerber_geometry(os.path.join(SAMPLES, "test70x70.gbr"))
+    assert not w.use_calibration and w.matrix_coeffs is None
+    assert w.manual_file_pts == [None] * 4 and w.manual_mach_pts == [None] * 4
+    assert all(btn.text().startswith("Зафиксировать Точку") for btn in w.point_buttons)
+    assert w.calib_info_label.text() == ""
+    assert w.generated_gcode is None and not w.btn_save.isEnabled()
+    # Без привязки новая плата прижата к нулю станка
+    _, (xmin, ymin, _, _) = w.geo_context.get_burn_geometry()
+    assert (xmin, ymin) == pytest.approx((0.0, 0.0))
 
 
 def test_dialog_remembers_last_aiming(qapp, accept_dialogs):

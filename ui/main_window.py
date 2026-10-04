@@ -1,6 +1,5 @@
 """Главное окно конвертера: параметры станка, привязка платы по точкам, превью и сохранение G-кода."""
 
-import math
 import os
 import traceback
 
@@ -326,42 +325,23 @@ class LaserConverterApp(QtWidgets.QWidget):
 
         # Ключ use_camera_offset — от прежней галочки «компенсация смещения камеры»
         self.last_aimed_by_camera = str(self.settings.value("use_camera_offset", "false")).lower() == "true"
-        self._load_saved_calibration()
+        self._forget_saved_calibration()
         self._loading_settings = False
 
-    def _load_saved_calibration(self):
-        """Восстанавливает точки привязки и матрицу прошлого сеанса"""
-        if self.settings.value("calib_matrix_active", "false") != "true":
-            return
-        try:
-            keys = ("mat_m11", "mat_m21", "mat_m12", "mat_m22", "mat_dx", "mat_dy")
-            defaults = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-            coeffs = tuple(float(self.settings.value(k, d)) for k, d in zip(keys, defaults, strict=True))
-            m11, m21, m12, m22, _, _ = coeffs
-            if not all(math.isfinite(v) for v in coeffs) or abs(m11 * m22 - m21 * m12) < 1e-9:
-                raise ValueError(f"матрица вырождена или содержит NaN: {coeffs}")
-
-            for idx in range(POINT_COUNT):
-                fx, fy = self.settings.value(f"pt_file_{idx}_x"), self.settings.value(f"pt_file_{idx}_y")
-                mx, my = self.settings.value(f"pt_mach_{idx}_x"), self.settings.value(f"pt_mach_{idx}_y")
-                if None in (fx, fy, mx, my):
-                    continue
-                has_cam = self.settings.value(f"pt_mach_{idx}_cam", "false") == "true"
-                self.manual_file_pts[idx] = (float(fx), float(fy))
-                self.manual_mach_pts[idx] = (float(mx), float(my), has_cam)
-                cam_label = " (+Камера)" if has_cam else ""
-                self.point_buttons[idx].setText(
-                    f"Т{idx + 1}: Загружено -> Ст({float(mx):.2f}, {float(my):.2f}){cam_label}"
-                )
-                self.point_buttons[idx].setStyleSheet(DONE_STYLE)
-
-            self.matrix_coeffs = coeffs
-            self.use_calibration = True
-            self.calib_info_label.setText(f"Привязка из прошлого сеанса: {describe_affine(coeffs)}")
-        except (TypeError, ValueError) as e:
-            print(f"Ошибка загрузки калибровки из INI: {e}")
-            self.matrix_coeffs = None
-            self.use_calibration = False
+    def _forget_saved_calibration(self):
+        """Точки привязки и матрица прошлых версий хранились в INI — убираем, привязка делается заново"""
+        keys = ["calib_matrix_active", "mat_m11", "mat_m21", "mat_m12", "mat_m22", "mat_dx", "mat_dy"]
+        for idx in range(POINT_COUNT):
+            keys += [
+                f"pt_file_{idx}_x",
+                f"pt_file_{idx}_y",
+                f"pt_mach_{idx}_x",
+                f"pt_mach_{idx}_y",
+                f"pt_mach_{idx}_cam",
+            ]
+        for key in keys:
+            self.settings.remove(key)
+        self.settings.sync()
 
     def save_current_settings(self):
         """Мгновенно синхронизирует и перезаписывает параметры станка в INI-файл"""
@@ -378,28 +358,6 @@ class LaserConverterApp(QtWidgets.QWidget):
                 value = widget.value()
             self.settings.setValue(key, value)
         self.settings.setValue("use_camera_offset", "true" if self.last_aimed_by_camera else "false")
-        self.settings.sync()
-
-    def _save_calibration(self):
-        """Точки и матрица привязки в INI"""
-        active = bool(self.use_calibration and self.matrix_coeffs)
-        self.settings.setValue("calib_matrix_active", "true" if active else "false")
-        if active:
-            for key, value in zip(
-                ("mat_m11", "mat_m21", "mat_m12", "mat_m22", "mat_dx", "mat_dy"), self.matrix_coeffs, strict=True
-            ):
-                self.settings.setValue(key, float(value))
-        for idx in range(POINT_COUNT):
-            file_pt, mach_pt = self.manual_file_pts[idx], self.manual_mach_pts[idx]
-            if file_pt is None or mach_pt is None:
-                for key in ("pt_file_{}_x", "pt_file_{}_y", "pt_mach_{}_x", "pt_mach_{}_y", "pt_mach_{}_cam"):
-                    self.settings.remove(key.format(idx))
-                continue
-            self.settings.setValue(f"pt_file_{idx}_x", float(file_pt[0]))
-            self.settings.setValue(f"pt_file_{idx}_y", float(file_pt[1]))
-            self.settings.setValue(f"pt_mach_{idx}_x", float(mach_pt[0]))
-            self.settings.setValue(f"pt_mach_{idx}_y", float(mach_pt[1]))
-            self.settings.setValue(f"pt_mach_{idx}_cam", "true" if mach_pt[2] else "false")
         self.settings.sync()
 
     def machine_config(self):
@@ -432,7 +390,12 @@ class LaserConverterApp(QtWidgets.QWidget):
     def load_gerber_geometry(self, gerber_path):
         """Парсит Gerber-файл и оборачивает его геометрию в контекст платы"""
         try:
-            self.geo_context = GerberGeometryContext(load_gerber(gerber_path))
+            geometries = load_gerber(gerber_path)
+            # Новая плата — прежние точки привязки к ней не относятся
+            self._clear_points()
+            self.generated_gcode = None
+            self.btn_save.setDisabled(True)
+            self.geo_context = GerberGeometryContext(geometries)
             self.update_interactive_preview()
             self.sync_geometry_context()
             _, bounds = self.geo_context.get_burn_geometry()
@@ -462,13 +425,22 @@ class LaserConverterApp(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------ привязка по точкам
 
-    def reset_points(self):
-        """Сбрасывает все точки и привязку"""
+    def _clear_points(self):
+        """Забывает точки и привязку (без пересчета превью)"""
         self.manual_file_pts = [None] * POINT_COUNT
         self.manual_mach_pts = [None] * POINT_COUNT
         for idx, btn in enumerate(self.point_buttons):
             btn.setText(f"Зафиксировать Точку {idx + 1}")
+            btn.setToolTip("")
             btn.setStyleSheet("")
+        self.calibration = None
+        self.matrix_coeffs = None
+        self.use_calibration = False
+        self.calib_info_label.setText("")
+
+    def reset_points(self):
+        """Сбрасывает все точки и привязку"""
+        self._clear_points()
         self.recalculate_calibration()
 
     def _model_key(self):
@@ -519,7 +491,6 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.calib_info_label.setText(message)
             self.calib_info_label.setStyleSheet("color: #c62828;" if error else "color: #555555;")
 
-        self._save_calibration()
         if self.geo_context:
             self.update_interactive_preview()
             if local_center is not None:
