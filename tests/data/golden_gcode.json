@@ -1,0 +1,23 @@
+{
+ "test.gbr|base": "b588a0393bc731f7f74222fd26c1e62a4410c78cc419f5af69c7934366a803a0",
+ "test.gbr|calib": "ced266960bc9de997ee43205e80084fa6fa3edb3fe6b0cc9fab1bd0806ca282b",
+ "test.gbr|camera": "e7765e639a5c388cfdf11e71afc183ac8e04b6d4283209a171180d7f06348460",
+ "test.gbr|flipx_rot30_nosnake": "a7473c2d04e15518a1d1441468b01f005bbbdf1c06525b192392ed8306126366",
+ "test.gbr|flipy_rotm12_invert": "62d952e970b564b447ad70b23915e08c499e02e3135bb7c3a1d95a4f3674fac2",
+ "test.gbr|invert": "00c25f89f8456ffcc76cfb2df04619c97c3a2a135eb8d897020624ff975a95ad",
+ "test.gbr|m3_params": "bc9f211a8f60ccd06d4d384b7f3f9cda2ee7500e284a1228bc43eed7e8bf2c86",
+ "test140x90-B_Cu.gbr|base": "38b1659c7eddda844f388d6e32b605b3111e797b1c08a1bc6240686517391a6b",
+ "test140x90-B_Cu.gbr|calib": "8fbf0d613a74a34ebf399a5d3e15e83001099957e9292e40067b8d9d6009c7f2",
+ "test140x90-B_Cu.gbr|camera": "d4fb8222f2b283a65bd1216f39853a82e0cf42a3f00aadd9bebcd360bb4aada2",
+ "test140x90-B_Cu.gbr|flipx_rot30_nosnake": "ee4441d870de1664bb5814f3b63425662a3aafe48468ac54c7397bc481ed3936",
+ "test140x90-B_Cu.gbr|flipy_rotm12_invert": "7c6a118c79b6a09b4d496ca188d0d9ab3a5fc3381d0b2192657312938e2f7566",
+ "test140x90-B_Cu.gbr|invert": "5f1c698ffbef0dafe5290c2328acecc1c1d9ca41afb2554c4a77be8797a98436",
+ "test140x90-B_Cu.gbr|m3_params": "a1e4a867a0e28b58377c018838013b75c3cbf6e86cf9f0b2d5c0ca448d6995ba",
+ "test70x70.gbr|base": "aacf1c98706c8a2aec98024f5d1159ce772308ea5170ae51b761a59cd13d10dc",
+ "test70x70.gbr|calib": "5d3fde11ee11f0bb8d118ad492c34bbb970696c89f221370a5710a4c01fe3ed7",
+ "test70x70.gbr|camera": "250a8de5f13cabeba8abe6a199603f749cb7d8429ccbe00b8bc09d4ed6d29ef0",
+ "test70x70.gbr|flipx_rot30_nosnake": "d4c51280098b5171a0296650df809e5f1d953503c9b6055ae5cd0ca3b6e6d780",
+ "test70x70.gbr|flipy_rotm12_invert": "223420f809439e82b3a0745cbc8587af56b66c888afc9aa1a27f80b7ac742b33",
+ "test70x70.gbr|invert": "b77bf1c420a1c0fd2e3b117073507cc1ed679fb4c3f3d629a0418cf7fd9d7be4",
+ "test70x70.gbr|m3_params": "981eb060552610f12d079e69f67d192438baec11541e52d731fc81117a8ad9c7"
+}

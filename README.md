@@ -73,6 +73,35 @@ pip install PyQt6 numpy shapely gerbyx
 
 ---
 
+## 🗂 Структура проекта
+
+```
+main.py              — точка входа (запуск окна)
+core/                — расчеты без интерфейса (не зависят от Qt)
+  gerber.py          — загрузка Gerber в геометрию shapely (мм)
+  geometry.py        — трансформации платы и растровое сканирование
+  calibration.py     — аффинная матрица привязки по реперным точкам (МНК)
+  gcode.py           — генерация растрового G-кода
+ui/                  — интерфейс PyQt6
+  main_window.py     — главное окно
+  view.py            — сетка, зум и HUD-прицел
+  qt_paths.py        — геометрия и траектории -> пути Qt
+samples/             — примеры Gerber-файлов
+tests/               — тесты pytest
+docs/images/         — скриншоты
+```
+
+## 🧪 Тесты
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Тест `tests/test_gcode.py::test_gcode_matches_golden` сверяет G-код для файлов из `samples/` с эталонными хешами в `tests/data/golden_gcode.json`. Если формат G-кода меняется намеренно, эталон нужно перегенерировать.
+
+---
+
 ## 📂 Структура конфигурации
 Приложение сохраняет пользовательские настройки в домашней директории пользователя в файле:
 `~/.LaserConverterApp.ini` (в Linux/macOS) или в реестре/папке пользователя (в Windows). Это позволяет не настраивать параметры мощности и шага луча заново при каждом запуске.
