@@ -60,10 +60,3 @@ def test_flip_and_rotate_order():
     # После зеркала маркер слева; после поворота на +90° он внизу
     assert geom.intersects(box(0.1, 0.1, 0.9, 0.9))
     assert not geom.intersects(box(0.1, 3.1, 0.9, 3.9))
-
-
-def test_camera_offset_shifts_board():
-    plain, b0 = make_context("test.gbr", config("base")).get_burn_geometry()
-    shifted, b1 = make_context("test.gbr", config("camera")).get_burn_geometry()
-    assert b1 == pytest.approx((b0[0] + 42.9, b0[1] + 0.55, b0[2] + 42.9, b0[3] + 0.55))
-    assert shifted.area == pytest.approx(plain.area)

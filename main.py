@@ -33,8 +33,10 @@ if __name__ == "__main__":
     window.show()
 
     if simulator:
-        # Физическое смещение камеры виртуального станка = заданному в программе (его можно поменять в окне)
+        # Поле и смещение камеры виртуального станка = заданным в программе (их можно поменять в окне симулятора)
         simulator.spin_cam_x.setValue(window.spin_cam_offset_x.value())
         simulator.spin_cam_y.setValue(window.spin_cam_offset_y.value())
+        simulator.spin_field_w.setValue(window.spin_field_w.value())
+        simulator.spin_field_h.setValue(window.spin_field_h.value())
         simulator.show()
     sys.exit(app.exec())

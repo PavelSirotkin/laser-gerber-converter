@@ -1,4 +1,4 @@
-"""Главное окно конвертера: параметры станка, калибровка по точкам, превью и сохранение G-кода."""
+"""Главное окно конвертера: параметры станка, привязка платы по точкам, превью и сохранение G-кода."""
 
 import math
 import os
@@ -6,12 +6,18 @@ import traceback
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from core.calibration import CalibrationError, describe_affine, fit_affine
+from core.calibration import MIN_POINTS, MODEL_NAMES, CalibrationError, describe_affine, fit, short_description
+from core.coords import parse_coordinates
 from core.gcode import GcodeParams, generate_gcode
 from core.geometry import GerberGeometryContext
 from core.gerber import load_gerber
+from core.machine import MachineConfig, camera_dead_zone, travel_overflow
 from ui.qt_paths import shapely_to_qt_paths, toolpath_to_qt_paths
 from ui.view import LaserGraphicsView
+
+POINT_COUNT = 4
+POINT_COLORS = ["#ff1744", "#2979ff", "#00e676", "#e040fb"]
+DONE_STYLE = "background-color: #c8e6c9; font-weight: bold;"
 
 
 class LaserConverterApp(QtWidgets.QWidget):
@@ -22,20 +28,39 @@ class LaserConverterApp(QtWidgets.QWidget):
         ini_path = os.path.expanduser("~/.LaserConverterApp.ini")
         self.settings = QtCore.QSettings(ini_path, QtCore.QSettings.Format.IniFormat)
 
-        # ООП-объект геометрического контекста печатной платы
+        # Геометрия печатной платы и последний рассчитанный G-код
         self.geo_context = None
         self.generated_gcode = None
 
-        # Массивы для фиксации реперов (на 4 точки)
-        self.manual_file_pts = [None, None, None, None]
-        self.manual_mach_pts = [None, None, None, None]
-        self.manual_markers = [None, None, None, None]
+        # Реперные точки: локальные координаты на плате и координаты станка (X, Y, наведено камерой)
+        self.manual_file_pts = [None] * POINT_COUNT
+        self.manual_mach_pts = [None] * POINT_COUNT
+        self.manual_markers = [None] * POINT_COUNT
 
+        # Результат привязки (core.calibration.CalibrationResult) и ее матрица
+        self.calibration = None
         self.use_calibration = False
         self.matrix_coeffs = None
 
+        self._loading_settings = False
         self.init_ui()
         self.load_saved_settings()
+
+    # ------------------------------------------------------------------ интерфейс
+
+    def _spin(self, grid, row, label, lo, hi, value, decimals=None, step=None):
+        """Поле ввода числа в сетке параметров (колесико мыши его не меняет)"""
+        grid.addWidget(QtWidgets.QLabel(label), row, 0)
+        box = QtWidgets.QDoubleSpinBox() if decimals is not None else QtWidgets.QSpinBox()
+        if decimals is not None:
+            box.setDecimals(decimals)
+        box.setRange(lo, hi)
+        if step is not None:
+            box.setSingleStep(step)
+        box.setValue(value)
+        box.installEventFilter(self)
+        grid.addWidget(box, row, 1)
+        return box
 
     def init_ui(self):
         self.setWindowTitle("LaserGRBL Raster Converter & Native Visualizer (OOP-Engine)")
@@ -45,12 +70,16 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.layout_horizontal = QtWidgets.QHBoxLayout()
         self.setLayout(self.layout_horizontal)
 
-        # Левая панель управления параметрами станка
+        # Левая панель управления — в прокрутке, чтобы помещалась на небольших экранах
         self.left_panel = QtWidgets.QWidget()
         self.left_layout = QtWidgets.QVBoxLayout()
         self.left_panel.setLayout(self.left_layout)
-        self.left_panel.setFixedWidth(430)
-        self.layout_horizontal.addWidget(self.left_panel)
+        left_scroll = QtWidgets.QScrollArea()
+        left_scroll.setWidget(self.left_panel)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        left_scroll.setFixedWidth(455)
+        self.layout_horizontal.addWidget(left_scroll)
 
         # БЛОК 1: Исходный файл Gerber
         self.file_group = QtWidgets.QGroupBox("Исходный файл Gerber")
@@ -64,63 +93,22 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.file_layout.addWidget(self.btn_browse)
         self.left_layout.addWidget(self.file_group)
 
-        # БЛОК 2: Параметры лазера и станка ЧПУ
-        self.param_group = QtWidgets.QGroupBox("Параметры лазера и станка")
-        self.param_grid = QtWidgets.QGridLayout()
-        self.param_group.setLayout(self.param_grid)
+        # БЛОК 2: Параметры лазера
+        self.param_group = QtWidgets.QGroupBox("Параметры лазера")
+        grid = QtWidgets.QGridLayout()
+        self.param_group.setLayout(grid)
 
-        self.param_grid.addWidget(QtWidgets.QLabel("Режим лазера GRBL:"), 0, 0)
+        grid.addWidget(QtWidgets.QLabel("Режим лазера GRBL:"), 0, 0)
         self.combo_laser_mode = QtWidgets.QComboBox()
         self.combo_laser_mode.addItems(["M4 (Динамическая мощность)", "M3 (Постоянная мощность)"])
-        self.param_grid.addWidget(self.combo_laser_mode, 0, 1)
+        grid.addWidget(self.combo_laser_mode, 0, 1)
 
-        self.param_grid.addWidget(QtWidgets.QLabel("Мощность для контура (S):"), 1, 0)
-        self.spin_contour_power = QtWidgets.QSpinBox()
-        self.spin_contour_power.setRange(0, 1000)
-        self.spin_contour_power.setValue(10)
-        self.spin_contour_power.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_contour_power, 1, 1)
-
-        self.param_grid.addWidget(QtWidgets.QLabel("Макс. мощность лазера (S):"), 2, 0)
-        self.spin_power = QtWidgets.QSpinBox()
-        self.spin_power.setRange(1, 1000)
-        self.spin_power.setValue(1000)
-        self.spin_power.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_power, 2, 1)
-
-        self.param_grid.addWidget(QtWidgets.QLabel("Скорость гравировки (мм/мин):"), 3, 0)
-        self.spin_feed = QtWidgets.QSpinBox()
-        self.spin_feed.setRange(1, 30000)
-        self.spin_feed.setValue(1500)
-        self.spin_feed.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_feed, 3, 1)
-
-        self.param_grid.addWidget(QtWidgets.QLabel("Шаг строки / Луч (мм):"), 4, 0)
-        self.spin_step = QtWidgets.QDoubleSpinBox()
-        self.spin_step.setDecimals(4)
-        self.spin_step.setRange(0.0010, 10.0000)
-        self.spin_step.setSingleStep(0.01)
-        self.spin_step.setValue(0.1000)
-        self.spin_step.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_step, 4, 1)
-
-        self.param_grid.addWidget(QtWidgets.QLabel("Вылет каретки Overscan (мм):"), 5, 0)
-        self.spin_overscan = QtWidgets.QDoubleSpinBox()
-        self.spin_overscan.setDecimals(1)
-        self.spin_overscan.setRange(0.0, 50.0)
-        self.spin_overscan.setValue(2.0)
-        self.spin_overscan.setSingleStep(0.5)
-        self.spin_overscan.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_overscan, 5, 1)
-
-        self.param_grid.addWidget(QtWidgets.QLabel("Точный поворот стола (град):"), 6, 0)
-        self.spin_rotate = QtWidgets.QDoubleSpinBox()
-        self.spin_rotate.setDecimals(4)
-        self.spin_rotate.setRange(-360.000, 360.000)
-        self.spin_rotate.setSingleStep(0.01)
-        self.spin_rotate.setValue(0.000)
-        self.spin_rotate.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_rotate, 6, 1)
+        self.spin_contour_power = self._spin(grid, 1, "Мощность для контура (S):", 0, 1000, 10)
+        self.spin_power = self._spin(grid, 2, "Макс. мощность лазера (S):", 1, 1000, 1000)
+        self.spin_feed = self._spin(grid, 3, "Скорость гравировки (мм/мин):", 1, 30000, 1500)
+        self.spin_step = self._spin(grid, 4, "Шаг строки / Луч (мм):", 0.001, 10.0, 0.1, 4, 0.01)
+        self.spin_overscan = self._spin(grid, 5, "Вылет каретки Overscan (мм):", 0.0, 50.0, 2.0, 1, 0.5)
+        self.spin_rotate = self._spin(grid, 6, "Точный поворот стола (град):", -360.0, 360.0, 0.0, 4, 0.01)
         self.left_layout.addWidget(self.param_group)
 
         # БЛОК 3: Режимы работы и зеркалирование
@@ -138,76 +126,66 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.modes_layout.addWidget(self.cb_flip_y, 1, 1)
         self.left_layout.addWidget(self.modes_group)
 
-        # БЛОК 4: Оптическое смещение (офсет) камеры
-        self.camera_group = QtWidgets.QGroupBox("Оптическое смещение (офсет) камеры")
-        camera_main_layout = QtWidgets.QVBoxLayout()
-        self.camera_group.setLayout(camera_main_layout)
+        # БЛОК 4: Станок и камера
+        self.machine_group = QtWidgets.QGroupBox("Станок и камера")
+        grid = QtWidgets.QGridLayout()
+        self.machine_group.setLayout(grid)
+        self.spin_field_w = self._spin(grid, 0, "Рабочее поле X (мм):", 1.0, 5000.0, 165.0, 1, 1.0)
+        self.spin_field_h = self._spin(grid, 1, "Рабочее поле Y (мм):", 1.0, 5000.0, 95.0, 1, 1.0)
+        self.spin_cam_offset_x = self._spin(grid, 2, "Камера X (Лазер -> Камера):", -5000, 5000, 0.0, 4, 0.1)
+        self.spin_cam_offset_y = self._spin(grid, 3, "Камера Y (Лазер -> Камера):", -5000, 5000, 0.0, 4, 0.1)
+        for box in (self.spin_cam_offset_x, self.spin_cam_offset_y):
+            box.setToolTip("Положение камеры относительно лазера, мм. Может быть отрицательным.")
+        self.cb_use_camera_offset = QtWidgets.QCheckBox("Точки наводятся камерой (по умолчанию)")
+        self.cb_use_camera_offset.setToolTip(
+            "Начальное состояние галочки «Учитывать смещение камеры» в окне ввода координат станка.\n"
+            "Смещение применяется только к точкам, наведенным камерой, и не сдвигает рисунок."
+        )
+        grid.addWidget(self.cb_use_camera_offset, 4, 0, 1, 2)
+        self.left_layout.addWidget(self.machine_group)
 
-        self.cb_use_camera_offset = QtWidgets.QCheckBox("Включить компенсацию смещения камеры")
-        self.cb_use_camera_offset.setStyleSheet("font-weight: bold; color: #43a047;")
-        self.cb_use_camera_offset.stateChanged.connect(self.toggle_camera_fields_visibility)
-        camera_main_layout.addWidget(self.cb_use_camera_offset)
-
-        # Контейнер для полей ввода офсета камеры
-        self.camera_fields_widget = QtWidgets.QWidget()
-        camera_grid = QtWidgets.QGridLayout(self.camera_fields_widget)
-        camera_grid.setContentsMargins(0, 5, 0, 0)
-
-        camera_grid.addWidget(QtWidgets.QLabel("Сдвиг по X (Камера -> Лазер):"), 0, 0)
-        self.spin_cam_offset_x = QtWidgets.QDoubleSpinBox()
-        self.spin_cam_offset_x.setDecimals(4)
-        self.spin_cam_offset_x.setRange(-5000.000, 5000.000)
-        self.spin_cam_offset_x.setSingleStep(0.1)
-        self.spin_cam_offset_x.setValue(0.000)
-        self.spin_cam_offset_x.installEventFilter(self)
-        self.spin_cam_offset_x.valueChanged.connect(self.update_interactive_preview)
-        camera_grid.addWidget(self.spin_cam_offset_x, 0, 1)
-
-        camera_grid.addWidget(QtWidgets.QLabel("Сдвиг по Y (Камера -> Лазер):"), 1, 0)
-        self.spin_cam_offset_y = QtWidgets.QDoubleSpinBox()
-        self.spin_cam_offset_y.setDecimals(4)
-        self.spin_cam_offset_y.setRange(-5000.000, 5000.000)
-        self.spin_cam_offset_y.setSingleStep(0.1)
-        self.spin_cam_offset_y.setValue(0.000)
-        self.spin_cam_offset_y.installEventFilter(self)
-        self.spin_cam_offset_y.valueChanged.connect(self.update_interactive_preview)
-        camera_grid.addWidget(self.spin_cam_offset_y, 1, 1)
-
-        camera_main_layout.addWidget(self.camera_fields_widget)
-        self.camera_fields_widget.setVisible(False)
-        self.left_layout.addWidget(self.camera_group)
-        # БЛОК 5: Включение ручной разметки платы по точкам
-        self.cb_enable_calib = QtWidgets.QCheckBox("Включить ручную разметку платы по точкам")
+        # БЛОК 5: Привязка платы по точкам
+        self.cb_enable_calib = QtWidgets.QCheckBox("Включить привязку платы по точкам")
         self.cb_enable_calib.setStyleSheet("font-weight: bold; color: #0288d1; margin-top: 5px;")
         self.cb_enable_calib.stateChanged.connect(self.toggle_manual_calibration)
         self.left_layout.addWidget(self.cb_enable_calib)
 
-        self.calib_group = QtWidgets.QGroupBox("Базирование по центральному прицелу")
+        self.calib_group = QtWidgets.QGroupBox("Привязка по центральному прицелу")
         self.calib_layout = QtWidgets.QVBoxLayout()
         self.calib_group.setLayout(self.calib_layout)
 
-        self.cb_use_pt4 = QtWidgets.QCheckBox("Использовать 4-ю точку для коррекции деформаций")
-        self.cb_use_pt4.stateChanged.connect(self.toggle_pt4_active)
-        self.calib_layout.addWidget(self.cb_use_pt4)
+        model_row = QtWidgets.QHBoxLayout()
+        model_row.addWidget(QtWidgets.QLabel("Модель:"))
+        self.combo_calib_model = QtWidgets.QComboBox()
+        for key in ("auto", "translation", "rigid", "similarity", "affine"):
+            self.combo_calib_model.addItem(MODEL_NAMES[key], key)
+        self.combo_calib_model.setToolTip(
+            "Авто: 1 точка — сдвиг, 2 — сдвиг + поворот, 3 и больше — аффинная.\n"
+            "Сдвиг — от 1 точки; сдвиг + поворот — от 2 точек (текстолит не растягивается — обычно лучший выбор);\n"
+            "+ масштаб — от 2 точек; аффинная — от 3 точек (растяжение и перекос заготовки)."
+        )
+        self.combo_calib_model.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.combo_calib_model.currentIndexChanged.connect(self.recalculate_calibration)
+        model_row.addWidget(self.combo_calib_model, 1)
+        self.calib_layout.addLayout(model_row)
 
-        # Кнопки фиксации точек станка
-        self.btn_pt1 = QtWidgets.QPushButton("Зафиксировать Точку 1")
-        self.btn_pt2 = QtWidgets.QPushButton("Зафиксировать Точку 2")
-        self.btn_pt3 = QtWidgets.QPushButton("Зафиксировать Точку 3")
-        self.btn_pt4 = QtWidgets.QPushButton("Зафиксировать Точку 4")
-        self.btn_pt4.setDisabled(True)
+        self.point_buttons = []
+        for idx in range(POINT_COUNT):
+            btn = QtWidgets.QPushButton(f"Зафиксировать Точку {idx + 1}")
+            btn.clicked.connect(lambda _=False, i=idx: self.capture_point_in_crosshair(i))
+            # Длинный текст с координатами не расширяет панель (полностью виден в подсказке)
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+            self.calib_layout.addWidget(btn)
+            self.point_buttons.append(btn)
+        self.btn_pt1, self.btn_pt2, self.btn_pt3, self.btn_pt4 = self.point_buttons
 
-        self.btn_pt1.clicked.connect(lambda: self.capture_point_in_crosshair(0))
-        self.btn_pt2.clicked.connect(lambda: self.capture_point_in_crosshair(1))
-        self.btn_pt3.clicked.connect(lambda: self.capture_point_in_crosshair(2))
-        self.btn_pt4.clicked.connect(lambda: self.capture_point_in_crosshair(3))
+        self.btn_reset_points = QtWidgets.QPushButton("Сбросить точки")
+        self.btn_reset_points.clicked.connect(self.reset_points)
+        self.calib_layout.addWidget(self.btn_reset_points)
 
-        self.calib_layout.addWidget(self.btn_pt1)
-        self.calib_layout.addWidget(self.btn_pt2)
-        self.calib_layout.addWidget(self.btn_pt3)
-        self.calib_layout.addWidget(self.btn_pt4)
-
-        # Что вычислила калибровка: поворот, масштаб, перекос, сдвиг
+        # Что вычислила привязка: модель, поворот, масштаб, перекос, сдвиг, невязка
         self.calib_info_label = QtWidgets.QLabel()
         self.calib_info_label.setWordWrap(True)
         self.calib_info_label.setStyleSheet("color: #2e7d32;")
@@ -215,25 +193,26 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.left_layout.addWidget(self.calib_group)
         self.calib_group.setVisible(False)
 
-        # Подключение сигналов автоматического сохранения настроек
-        self.combo_laser_mode.currentIndexChanged.connect(self.save_current_settings)
-        self.spin_contour_power.valueChanged.connect(self.save_current_settings)
-        self.spin_power.valueChanged.connect(self.save_current_settings)
-        self.spin_feed.valueChanged.connect(self.save_current_settings)
-        self.spin_step.valueChanged.connect(self.save_current_settings)
-        self.cb_use_camera_offset.stateChanged.connect(self.save_current_settings)
-        self.spin_cam_offset_x.valueChanged.connect(self.save_current_settings)
-        self.spin_cam_offset_y.valueChanged.connect(self.save_current_settings)
-
-        self.spin_rotate.valueChanged.connect(self.update_interactive_preview)
-        self.spin_overscan.valueChanged.connect(self.update_interactive_preview)
-        self.cb_snake.stateChanged.connect(self.update_interactive_preview)
-        self.cb_invert.stateChanged.connect(self.update_interactive_preview)
-        self.cb_flip_x.stateChanged.connect(self.update_interactive_preview)
-        self.cb_flip_y.stateChanged.connect(self.update_interactive_preview)
+        # Любое изменение параметра сразу сохраняется в INI; влияющие на рисунок — обновляют превью
+        for widget in self._settings_widgets().values():
+            self._changed_signal(widget[0]).connect(self.save_current_settings)
+        for widget in (
+            self.spin_rotate,
+            self.spin_overscan,
+            self.cb_snake,
+            self.cb_invert,
+            self.cb_flip_x,
+            self.cb_flip_y,
+            self.spin_field_w,
+            self.spin_field_h,
+            self.spin_cam_offset_x,
+            self.spin_cam_offset_y,
+        ):
+            self._changed_signal(widget).connect(self.update_interactive_preview)
 
         # Статус-бар и пусковые кнопки ЧПУ
         self.status_label = QtWidgets.QLabel("Статус: Ожидание выбора файла...")
+        self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("color: gray; font-weight: bold;")
         self.left_layout.addWidget(self.status_label)
 
@@ -260,172 +239,167 @@ class LaserConverterApp(QtWidgets.QWidget):
 
         self.view = LaserGraphicsView()
         self.plot_layout.addWidget(self.view)
-        self.layout_horizontal.addWidget(self.plot_group)
+        self.layout_horizontal.addWidget(self.plot_group, 1)
 
     def eventFilter(self, watched, event):
         """Блокирует случайное изменение числовых значений колесиком мыши"""
         if event.type() == QtCore.QEvent.Type.Wheel:
-            # Проверяем, является ли объект полем ввода (SpinBox)
             if isinstance(watched, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
-                # Игнорируем событие, чтобы значение не менялось
                 event.ignore()
-                return True  # Возвращаем True, сообщая Qt, что событие обработано и дальше идти не нужно
+                return True
         return super().eventFilter(watched, event)
 
-    def sync_geometry_context(self):
-        """Синхронизирует текущие параметры интерфейса в объект геометрического контекста платы"""
-        if not self.geo_context:
-            return
+    # ------------------------------------------------------------------ настройки
 
-        self.geo_context.rotate_angle = self.spin_rotate.value()
-        self.geo_context.flip_x = self.cb_flip_x.isChecked()
-        self.geo_context.flip_y = self.cb_flip_y.isChecked()
+    def _settings_widgets(self):
+        """Ключ INI -> (виджет, значение по умолчанию). Имена ключей совместимы с прежними версиями"""
+        return {
+            "laser_mode_idx": (self.combo_laser_mode, 0),
+            "contour_power": (self.spin_contour_power, 10),
+            "laser_power": (self.spin_power, 200),
+            "feed_rate": (self.spin_feed, 1500),
+            "raster_step": (self.spin_step, 0.1),
+            "overscan_dist": (self.spin_overscan, 2.0),
+            "rotate_angle": (self.spin_rotate, 0.0),
+            "cb_snake": (self.cb_snake, True),
+            "cb_invert": (self.cb_invert, False),
+            "cb_flip_x": (self.cb_flip_x, False),
+            "cb_flip_y": (self.cb_flip_y, False),
+            "use_camera_offset": (self.cb_use_camera_offset, False),
+            "cam_offset_x": (self.spin_cam_offset_x, 0.0),
+            "cam_offset_y": (self.spin_cam_offset_y, 0.0),
+            "field_w": (self.spin_field_w, 165.0),
+            "field_h": (self.spin_field_h, 95.0),
+            "calib_model": (self.combo_calib_model, "auto"),
+        }
 
-        self.geo_context.use_camera_offset = self.cb_use_camera_offset.isChecked()
-        self.geo_context.camera_offset_x = self.spin_cam_offset_x.value()
-        self.geo_context.camera_offset_y = self.spin_cam_offset_y.value()
-        self.geo_context.overscan = self.spin_overscan.value()
-
-        self.geo_context.use_calibration = self.use_calibration
-        self.geo_context.matrix_coeffs = self.matrix_coeffs
-
-    def toggle_camera_fields_visibility(self, state):
-        """Показывает или скрывает поля ввода офсета камеры и обновляет интерактивное превью"""
-        is_active = state == 2
-        if hasattr(self, "camera_fields_widget"):
-            self.camera_fields_widget.setVisible(is_active)
-        self.update_interactive_preview()
+    @staticmethod
+    def _changed_signal(widget):
+        if isinstance(widget, QtWidgets.QComboBox):
+            return widget.currentIndexChanged
+        if isinstance(widget, QtWidgets.QCheckBox):
+            return widget.stateChanged
+        return widget.valueChanged
 
     def load_saved_settings(self):
         """Загружает последнюю сохраненную сессию конфигурации станка из INI-файла"""
-        self.combo_laser_mode.blockSignals(True)
-        self.spin_contour_power.blockSignals(True)
-        self.spin_power.blockSignals(True)
-        self.spin_feed.blockSignals(True)
-        self.spin_step.blockSignals(True)
-        self.spin_overscan.blockSignals(True)
-        self.spin_rotate.blockSignals(True)
-        self.cb_snake.blockSignals(True)
-        self.cb_invert.blockSignals(True)
-        self.cb_flip_x.blockSignals(True)
-        self.cb_flip_y.blockSignals(True)
-        if hasattr(self, "cb_use_camera_offset"):
-            self.cb_use_camera_offset.blockSignals(True)
-        if hasattr(self, "spin_cam_offset_x"):
-            self.spin_cam_offset_x.blockSignals(True)
-        if hasattr(self, "spin_cam_offset_y"):
-            self.spin_cam_offset_y.blockSignals(True)
-
+        self._loading_settings = True
+        widgets = self._settings_widgets()
+        for widget, _ in widgets.values():
+            widget.blockSignals(True)
         try:
-            self.combo_laser_mode.setCurrentIndex(int(self.settings.value("laser_mode_idx", 0)))
-            self.spin_contour_power.setValue(int(self.settings.value("contour_power", 10)))
-            self.spin_power.setValue(int(self.settings.value("laser_power", 200)))
-            self.spin_feed.setValue(int(self.settings.value("feed_rate", 1500)))
-            self.spin_step.setValue(float(self.settings.value("raster_step", 0.1000)))
-            self.spin_overscan.setValue(float(self.settings.value("overscan_dist", 2.0)))
-            self.spin_rotate.setValue(float(self.settings.value("rotate_angle", 0.000)))
-            self.cb_snake.setChecked(self.settings.value("cb_snake", "true") == "true")
-            self.cb_invert.setChecked(self.settings.value("cb_invert", "false") == "true")
-            self.cb_flip_x.setChecked(self.settings.value("cb_flip_x", "false") == "true")
-            self.cb_flip_y.setChecked(self.settings.value("cb_flip_y", "false") == "true")
-
-            if hasattr(self, "cb_use_camera_offset"):
-                self.cb_use_camera_offset.setChecked(self.settings.value("use_camera_offset", "false") == "true")
-            if hasattr(self, "spin_cam_offset_x"):
-                self.spin_cam_offset_x.setValue(float(self.settings.value("cam_offset_x", 0.000)))
-            if hasattr(self, "spin_cam_offset_y"):
-                self.spin_cam_offset_y.setValue(float(self.settings.value("cam_offset_y", 0.000)))
-
-            if hasattr(self, "cb_use_camera_offset"):
-                state = 2 if self.cb_use_camera_offset.isChecked() else 0
-                self.toggle_camera_fields_visibility(state)
-
-            # АВТОЗАГРУЗКА МАТРИЦЫ 3-Х ТОЧЕК:
-            if self.settings.value("calib_matrix_active", "false") == "true":
+            for key, (widget, default) in widgets.items():
+                value = self.settings.value(key, default)
                 try:
-                    m11 = float(self.settings.value("mat_m11", 1.0))
-                    m21 = float(self.settings.value("mat_m21", 0.0))
-                    m12 = float(self.settings.value("mat_m12", 0.0))
-                    m22 = float(self.settings.value("mat_m22", 1.0))
-                    dx = float(self.settings.value("mat_dx", 0.0))
-                    dy = float(self.settings.value("mat_dy", 0.0))
-
-                    coeffs = (m11, m21, m12, m22, dx, dy)
-                    if not all(math.isfinite(v) for v in coeffs) or abs(m11 * m22 - m21 * m12) < 1e-9:
-                        raise ValueError(f"матрица вырождена или содержит NaN: {coeffs}")
-                    self.matrix_coeffs = coeffs
-                    self.use_calibration = True
-                    self.calib_info_label.setText(
-                        f"Калибровка из прошлого сеанса: {describe_affine(self.matrix_coeffs)}"
-                    )
-
-                    buttons = [self.btn_pt1, self.btn_pt2, self.btn_pt3, self.btn_pt4]
-                    for idx in range(4):
-                        fx = self.settings.value(f"pt_file_{idx}_x")
-                        fy = self.settings.value(f"pt_file_{idx}_y")
-                        mx = self.settings.value(f"pt_mach_{idx}_x")
-                        my = self.settings.value(f"pt_mach_{idx}_y")
-                        has_cam = self.settings.value(f"pt_mach_{idx}_cam", "false") == "true"
-
-                        if fx is not None and mx is not None:
-                            self.manual_file_pts[idx] = (float(fx), float(fy))
-                            self.manual_mach_pts[idx] = (float(mx), float(my), has_cam)
-                            cam_label = " (+Камера)" if has_cam else ""
-                            buttons[idx].setText(
-                                f"Т{idx + 1}: Загружено -> Ст({float(mx):.2f}, {float(my):.2f}){cam_label}"
-                            )
-                            buttons[idx].setStyleSheet("background-color: #c8e6c9; font-weight: bold;")
-
-                    self.cb_enable_calib.setChecked(True)
+                    if widget is self.combo_calib_model:
+                        idx = widget.findData(str(value))
+                        widget.setCurrentIndex(max(idx, 0))
+                    elif isinstance(widget, QtWidgets.QComboBox):
+                        widget.setCurrentIndex(int(value))
+                    elif isinstance(widget, QtWidgets.QCheckBox):
+                        widget.setChecked(str(value).lower() == "true")
+                    elif isinstance(widget, QtWidgets.QSpinBox):
+                        widget.setValue(int(float(value)))
+                    else:
+                        widget.setValue(float(value))
                 except (TypeError, ValueError) as e:
-                    print(f"Ошибка загрузки калибровки из INI: {e}")
-
-        except Exception as e:
-            print(f"Ошибка инициализации INI: {str(e)}")
+                    print(f"Ошибка чтения настройки {key}={value!r}: {e}")
         finally:
-            self.combo_laser_mode.blockSignals(False)
-            self.spin_contour_power.blockSignals(False)
-            self.spin_power.blockSignals(False)
-            self.spin_feed.blockSignals(False)
-            self.spin_step.blockSignals(False)
-            self.spin_overscan.blockSignals(False)
-            self.spin_rotate.blockSignals(False)
-            self.cb_snake.blockSignals(False)
-            self.cb_invert.blockSignals(False)
-            self.cb_flip_x.blockSignals(False)
-            self.cb_flip_y.blockSignals(False)
-            if hasattr(self, "cb_use_camera_offset"):
-                self.cb_use_camera_offset.blockSignals(False)
-            if hasattr(self, "spin_cam_offset_x"):
-                self.spin_cam_offset_x.blockSignals(False)
-            if hasattr(self, "spin_cam_offset_y"):
-                self.spin_cam_offset_y.blockSignals(False)
+            for widget, _ in widgets.values():
+                widget.blockSignals(False)
+
+        self._load_saved_calibration()
+        self._loading_settings = False
+
+    def _load_saved_calibration(self):
+        """Восстанавливает точки привязки и матрицу прошлого сеанса"""
+        if self.settings.value("calib_matrix_active", "false") != "true":
+            return
+        try:
+            keys = ("mat_m11", "mat_m21", "mat_m12", "mat_m22", "mat_dx", "mat_dy")
+            defaults = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            coeffs = tuple(float(self.settings.value(k, d)) for k, d in zip(keys, defaults, strict=True))
+            m11, m21, m12, m22, _, _ = coeffs
+            if not all(math.isfinite(v) for v in coeffs) or abs(m11 * m22 - m21 * m12) < 1e-9:
+                raise ValueError(f"матрица вырождена или содержит NaN: {coeffs}")
+
+            for idx in range(POINT_COUNT):
+                fx, fy = self.settings.value(f"pt_file_{idx}_x"), self.settings.value(f"pt_file_{idx}_y")
+                mx, my = self.settings.value(f"pt_mach_{idx}_x"), self.settings.value(f"pt_mach_{idx}_y")
+                if None in (fx, fy, mx, my):
+                    continue
+                has_cam = self.settings.value(f"pt_mach_{idx}_cam", "false") == "true"
+                self.manual_file_pts[idx] = (float(fx), float(fy))
+                self.manual_mach_pts[idx] = (float(mx), float(my), has_cam)
+                cam_label = " (+Камера)" if has_cam else ""
+                self.point_buttons[idx].setText(
+                    f"Т{idx + 1}: Загружено -> Ст({float(mx):.2f}, {float(my):.2f}){cam_label}"
+                )
+                self.point_buttons[idx].setStyleSheet(DONE_STYLE)
+
+            self.matrix_coeffs = coeffs
+            self.use_calibration = True
+            self.calib_info_label.setText(f"Привязка из прошлого сеанса: {describe_affine(coeffs)}")
+            self.cb_enable_calib.blockSignals(True)
+            self.cb_enable_calib.setChecked(True)
+            self.cb_enable_calib.blockSignals(False)
+            self._show_calibration_ui(True)
+        except (TypeError, ValueError) as e:
+            print(f"Ошибка загрузки калибровки из INI: {e}")
+            self.matrix_coeffs = None
+            self.use_calibration = False
 
     def save_current_settings(self):
         """Мгновенно синхронизирует и перезаписывает параметры станка в INI-файл"""
-        self.settings.setValue("laser_mode_idx", self.combo_laser_mode.currentIndex())
-        self.settings.setValue("contour_power", self.spin_contour_power.value())
-        self.settings.setValue("laser_power", self.spin_power.value())
-        self.settings.setValue("feed_rate", self.spin_feed.value())
-        self.settings.setValue("raster_step", self.spin_step.value())
-        self.settings.setValue("overscan_dist", self.spin_overscan.value())
-        self.settings.setValue("rotate_angle", self.spin_rotate.value())
-        self.settings.setValue("cb_snake", "true" if self.cb_snake.isChecked() else "false")
-        self.settings.setValue("cb_invert", "true" if self.cb_invert.isChecked() else "false")
-        self.settings.setValue("cb_flip_x", "true" if self.cb_flip_x.isChecked() else "false")
-        self.settings.setValue("cb_flip_y", "true" if self.cb_flip_y.isChecked() else "false")
-        if hasattr(self, "cb_use_camera_offset"):
-            self.settings.setValue("use_camera_offset", "true" if self.cb_use_camera_offset.isChecked() else "false")
-        if hasattr(self, "spin_cam_offset_x"):
-            self.settings.setValue("cam_offset_x", self.spin_cam_offset_x.value())
-        if hasattr(self, "spin_cam_offset_y"):
-            self.settings.setValue("cam_offset_y", self.spin_cam_offset_y.value())
+        if self._loading_settings:
+            return
+        for key, (widget, _) in self._settings_widgets().items():
+            if widget is self.combo_calib_model:
+                value = widget.currentData()
+            elif isinstance(widget, QtWidgets.QComboBox):
+                value = widget.currentIndex()
+            elif isinstance(widget, QtWidgets.QCheckBox):
+                value = "true" if widget.isChecked() else "false"
+            else:
+                value = widget.value()
+            self.settings.setValue(key, value)
         self.settings.sync()
+
+    def _save_calibration(self):
+        """Точки и матрица привязки в INI"""
+        active = bool(self.use_calibration and self.matrix_coeffs)
+        self.settings.setValue("calib_matrix_active", "true" if active else "false")
+        if active:
+            for key, value in zip(
+                ("mat_m11", "mat_m21", "mat_m12", "mat_m22", "mat_dx", "mat_dy"), self.matrix_coeffs, strict=True
+            ):
+                self.settings.setValue(key, float(value))
+        for idx in range(POINT_COUNT):
+            file_pt, mach_pt = self.manual_file_pts[idx], self.manual_mach_pts[idx]
+            if file_pt is None or mach_pt is None:
+                for key in ("pt_file_{}_x", "pt_file_{}_y", "pt_mach_{}_x", "pt_mach_{}_y", "pt_mach_{}_cam"):
+                    self.settings.remove(key.format(idx))
+                continue
+            self.settings.setValue(f"pt_file_{idx}_x", float(file_pt[0]))
+            self.settings.setValue(f"pt_file_{idx}_y", float(file_pt[1]))
+            self.settings.setValue(f"pt_mach_{idx}_x", float(mach_pt[0]))
+            self.settings.setValue(f"pt_mach_{idx}_y", float(mach_pt[1]))
+            self.settings.setValue(f"pt_mach_{idx}_cam", "true" if mach_pt[2] else "false")
+        self.settings.sync()
+
+    def machine_config(self):
+        return MachineConfig(
+            self.spin_field_w.value(),
+            self.spin_field_h.value(),
+            (self.spin_cam_offset_x.value(), self.spin_cam_offset_y.value()),
+        )
 
     def closeEvent(self, event):
         """Гарантированное сохранение настроек при закрытии окна"""
         self.save_current_settings()
         event.accept()
+
+    # ------------------------------------------------------------------ файл
 
     def browse_file(self):
         """Вызывает проводник для выбора исходного Gerber-файла печатной платы"""
@@ -445,7 +419,12 @@ class LaserConverterApp(QtWidgets.QWidget):
         try:
             self.geo_context = GerberGeometryContext(load_gerber(gerber_path))
             self.update_interactive_preview()
-            self.view.fitInView(self.view.scene.itemsBoundingRect(), QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+            self.sync_geometry_context()
+            _, bounds = self.geo_context.get_burn_geometry()
+            xmin, ymin, xmax, ymax = bounds
+            self.view.fitInView(
+                QtCore.QRectF(xmin, -ymax, xmax - xmin, ymax - ymin), QtCore.Qt.AspectRatioMode.KeepAspectRatio
+            )
             if self.simulator:
                 self.simulator.set_board(self.geo_context.raw_geometries)
         except Exception as e:
@@ -456,295 +435,263 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.status_label.setText(f"Ошибка загрузки Gerber: {str(e)}")
             self.status_label.setStyleSheet("color: red;")
 
+    def sync_geometry_context(self):
+        """Синхронизирует текущие параметры интерфейса в объект геометрического контекста платы"""
+        if not self.geo_context:
+            return
+        self.geo_context.rotate_angle = self.spin_rotate.value()
+        self.geo_context.flip_x = self.cb_flip_x.isChecked()
+        self.geo_context.flip_y = self.cb_flip_y.isChecked()
+        self.geo_context.use_calibration = self.use_calibration
+        self.geo_context.matrix_coeffs = self.matrix_coeffs
+
+    # ------------------------------------------------------------------ привязка по точкам
+
+    def _show_calibration_ui(self, active):
+        self.calib_group.setVisible(active)
+        self.view.calibration_mode = active
+        if active:
+            self.view.scrollContentsBy(0, 0)
+        self.view.viewport().update()
+
     def toggle_manual_calibration(self, state):
-        """Включение/выключение режима центрального HUD-прицела станка и панели реперов"""
+        """Включение/выключение режима центрального HUD-прицела и панели реперов"""
         is_active = state == 2
-        if hasattr(self, "calib_group"):
-            self.calib_group.setVisible(is_active)
-
-        if hasattr(self, "view"):
-            self.view.calibration_mode = is_active
-            if is_active:
-                self.view.scrollContentsBy(0, 0)
-            self.view.viewport().update()
-
+        self._show_calibration_ui(is_active)
         if not is_active:
-            self.use_calibration = False
-            self.manual_file_pts = [None, None, None, None]
-            self.manual_mach_pts = [None, None, None, None]
-            self.calib_info_label.setText("")
-            self.redraw_calibration_markers()
+            self.reset_points()
 
-            if hasattr(self, "btn_pt1"):
-                self.btn_pt1.setText("Зафиксировать Точку 1")
-            if hasattr(self, "btn_pt2"):
-                self.btn_pt2.setText("Зафиксировать Точку 2")
-            if hasattr(self, "btn_pt3"):
-                self.btn_pt3.setText("Зафиксировать Точку 3")
-            if hasattr(self, "btn_pt4"):
-                self.btn_pt4.setText("Зафиксировать Точку 4")
+    def reset_points(self):
+        """Сбрасывает все точки и привязку"""
+        self.manual_file_pts = [None] * POINT_COUNT
+        self.manual_mach_pts = [None] * POINT_COUNT
+        for idx, btn in enumerate(self.point_buttons):
+            btn.setText(f"Зафиксировать Точку {idx + 1}")
+            btn.setStyleSheet("")
+        self.recalculate_calibration()
 
-            for btn in [self.btn_pt1, self.btn_pt2, self.btn_pt3, self.btn_pt4]:
-                if hasattr(btn, "setStyleSheet"):
-                    btn.setStyleSheet("")
+    def _model_key(self):
+        return self.combo_calib_model.currentData() or "auto"
 
-            self.settings.setValue("calib_matrix_active", "false")
-            self.settings.sync()
+    def recalculate_calibration(self):
+        """Пересчитывает привязку по зафиксированным точкам (после каждой точки, смены модели или сброса)"""
+        valid = [i for i in range(POINT_COUNT) if self.manual_file_pts[i] is not None and self.manual_mach_pts[i]]
+        model = self._model_key()
+        need = 1 if model == "auto" else MIN_POINTS[model]
 
-            if self.geo_context:
-                self.update_interactive_preview()
+        new_result, message, error = None, "", False
+        if len(valid) < need:
+            if valid or model != "auto":
+                message = f"«{MODEL_NAMES[model]}»: зафиксируйте еще {need - len(valid)} точ."
+        else:
+            try:
+                new_result = fit(
+                    [self.manual_file_pts[i] for i in valid],
+                    [self.manual_mach_pts[i][:2] for i in valid],
+                    model,
+                )
+            except CalibrationError as e:
+                message, error = str(e), True
+                QtWidgets.QMessageBox.warning(self, "Внимание", str(e))
 
-    def toggle_pt4_active(self, state):
-        """Включение/выключение использования опциональной 4-й точки"""
-        is_active = state == 2
-        self.btn_pt4.setEnabled(is_active)
+        # Точка платы под прицелом до смены системы координат экрана — после пересчета вернем ее под прицел
+        local_center = None
+        if self.geo_context:
+            self.sync_geometry_context()
+            cx, cy = self.view.get_center_board_coordinates()
+            try:
+                local_center = self.geo_context.display_to_local(cx, -cy)
+            except ValueError:
+                local_center = None
 
-        if not is_active:
-            self.manual_file_pts[3] = None
-            self.manual_mach_pts[3] = None
-            self.redraw_calibration_markers()
-            self.btn_pt4.setText("Зафиксировать Точку 4")
-            self.btn_pt4.setStyleSheet("")
+        self.calibration = new_result
+        self.matrix_coeffs = new_result.coeffs if new_result else None
+        self.use_calibration = new_result is not None
 
-            # Проверяем готовность первых 3 точек перед автоматическим пересчетом матрицы
-            if self.manual_file_pts and self.manual_mach_pts:
-                if all(pt is not None for pt in self.manual_file_pts[:3]) and all(
-                    pt is not None for pt in self.manual_mach_pts[:3]
-                ):
-                    self.calculate_manual_affine_matrix()
+        if new_result:
+            text = f"{MODEL_NAMES[new_result.model]} по {len(valid)} точ.:\n{describe_affine(new_result.coeffs)}"
+            if new_result.redundant:
+                text += f"\nНевязка (точность наведения): до {new_result.max_residual:.3f} мм"
+            self.calib_info_label.setText(text)
+            self.calib_info_label.setStyleSheet("color: #2e7d32;")
+        else:
+            self.calib_info_label.setText(message)
+            self.calib_info_label.setStyleSheet("color: #c62828;" if error else "color: #555555;")
+
+        self._save_calibration()
+        if self.geo_context:
+            self.update_interactive_preview()
+            if local_center is not None:
+                new_x, new_y = self.geo_context.local_to_display(*local_center)
+                self.view.centerOn(new_x, -new_y)
 
     def capture_point_in_crosshair(self, point_idx):
-        """Фиксирует координаты векторов: визуально - сетка экрана, скрыто для МНК - файл"""
+        """Фиксирует точку платы под прицелом и спрашивает ее координаты на станке"""
         if not self.geo_context:
             QtWidgets.QMessageBox.warning(self, "Внимание", "Сначала загрузите Gerber файл!")
             return
 
-        buttons = [self.btn_pt1, self.btn_pt2, self.btn_pt3, self.btn_pt4]
         scene_x, scene_y = self.view.get_center_board_coordinates()
-
-        # Считываем смещение камеры из интерфейса
-        # Галочка «Учитывать смещение камеры» в окне ввода добавляет смещение всегда;
-        # компенсация смещения в основном окне задает только ее начальное состояние
-        is_camera_active = self.cb_use_camera_offset.isChecked()
         cam_x = self.spin_cam_offset_x.value()
         cam_y = self.spin_cam_offset_y.value()
 
-        # Локальные координаты точки на плате для МНК. Экран может показывать плату как со
-        # смещением камеры, так и уже с примененной калибровкой — снимаем ровно то, что на экране.
+        # Локальные координаты точки на плате. Экран показывает плату либо прижатой к нулю,
+        # либо уже с привязкой — снимаем ровно то, что на экране
         self.sync_geometry_context()
         try:
-            self.manual_file_pts[point_idx] = self.geo_context.display_to_local(scene_x, -scene_y)
+            file_pt = self.geo_context.display_to_local(scene_x, -scene_y)
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, "Внимание", str(e))
             return
+        previous = (self.manual_file_pts[point_idx], self.manual_mach_pts[point_idx])
+        self.manual_file_pts[point_idx] = file_pt
         self.redraw_calibration_markers()
-        self.status_label.setText(f"Статус: Точка {point_idx + 1} зафиксирована в прицеле.")
-        self.status_label.setStyleSheet("color: #0288d1;")
 
-        try:
-            dialog = QtWidgets.QDialog(self)
-            dialog.setWindowTitle(f"Координаты станка для Точки {point_idx + 1}")
-            dialog.setMinimumWidth(340)
-            dialog_layout = QtWidgets.QVBoxLayout(dialog)
-
-            info_text = (
-                f"Вы навели прицел на репер платы.\n"
-                f"Координата прицела на сетке (то, что видите):\n"
-                f"   X = {scene_x:.4f} мм\n"
-                f"   Y = {-scene_y:.4f} мм\n\n"
-                f"Задайте точные координаты станка ЧПУ (DRO):"
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Координаты станка для Точки {point_idx + 1}")
+        dialog.setMinimumWidth(380)
+        dialog_layout = QtWidgets.QVBoxLayout(dialog)
+        dialog_layout.addWidget(
+            QtWidgets.QLabel(
+                "Вы навели прицел на репер платы.\n"
+                f"Координата прицела на сетке: X = {scene_x:.4f}, Y = {-scene_y:.4f} мм\n\n"
+                "Задайте координаты станка (DRO), при которых на этот репер\n"
+                "наведена камера или лазер:"
             )
-            dialog_layout.addWidget(QtWidgets.QLabel(info_text))
+        )
 
-            grid = QtWidgets.QGridLayout()
-            dialog_layout.addLayout(grid)
+        grid = QtWidgets.QGridLayout()
+        dialog_layout.addLayout(grid)
+        spin_x = self._spin(grid, 0, "Координата X станка (мм):", -9999.0, 9999.0, scene_x, 4, 0.1)
+        spin_y = self._spin(grid, 1, "Координата Y станка (мм):", -9999.0, 9999.0, -scene_y, 4, 0.1)
 
-            grid.addWidget(QtWidgets.QLabel("Координата X станка (мм):"), 0, 0)
-            spin_x = QtWidgets.QDoubleSpinBox()
-            spin_x.setDecimals(4)
-            spin_x.setRange(-9999.000, 9999.000)
-            spin_x.setSingleStep(0.1)
-            spin_x.installEventFilter(self)
-            grid.addWidget(spin_x, 0, 1)
+        cb_add_cam = QtWidgets.QCheckBox(f"Наведено камерой: учитывать смещение ({cam_x:+.4f}, {cam_y:+.4f} мм)")
+        cb_add_cam.setChecked(self.cb_use_camera_offset.isChecked())
+        dialog_layout.addWidget(cb_add_cam)
 
-            grid.addWidget(QtWidgets.QLabel("Координата Y станка (мм):"), 1, 0)
-            spin_y = QtWidgets.QDoubleSpinBox()
-            spin_y.setDecimals(4)
-            spin_y.setRange(-9999.000, 9999.000)
-            spin_y.setSingleStep(0.1)
-            spin_y.installEventFilter(self)
-            grid.addWidget(spin_y, 1, 1)
+        source_label = QtWidgets.QLabel()
+        source_label.setWordWrap(True)
+        source_label.setStyleSheet("color: #555555;")
 
-            # Подставляем координаты прицела как стартовое значение
-            spin_x.setValue(scene_x)
-            spin_y.setValue(-scene_y)
+        def paste_clipboard(show_failure=True):
+            text = QtWidgets.QApplication.clipboard().text()
+            xy = parse_coordinates(text)
+            if xy:
+                spin_x.setValue(xy[0])
+                spin_y.setValue(xy[1])
+                source_label.setText(f"Подставлено из буфера обмена: X {xy[0]:.4f}, Y {xy[1]:.4f}")
+            elif show_failure:
+                shown = text.strip()[:60] or "пусто"
+                source_label.setText(f"В буфере обмена нет координат ({shown}).")
+            return xy is not None
 
-            # Чекбокс автоматического добавления смещения камеры
-            cb_add_cam = QtWidgets.QCheckBox(f"Учитывать смещение камеры при вводе ({cam_x:+.4f}, {cam_y:+.4f} мм)")
-            cb_add_cam.setChecked(is_camera_active)
-            dialog_layout.addWidget(cb_add_cam)
+        btn_paste = QtWidgets.QPushButton("Вставить из буфера обмена")
+        btn_paste.setToolTip("Понимает статус GRBL (MPos:x,y,z), «X12.3 Y45.6» и «12.3, 45.6»")
+        btn_paste.clicked.connect(lambda: paste_clipboard(True))
+        dialog_layout.addWidget(btn_paste)
 
-            if self.simulator:
-                # Режим --test: координаты станка берем у виртуального станка, как оператор с экрана DRO
-                sim_info = QtWidgets.QLabel()
-                sim_info.setWordWrap(True)
-
-                def take_simulator_dro():
-                    dro = self.simulator.dro()
-                    if dro:
-                        spin_x.setValue(dro[0])
-                        spin_y.setValue(dro[1])
-                        # Наведено камерой — DRO дополняется смещением камеры, лазером — нет
-                        cb_add_cam.setChecked(self.simulator.aim_by_camera)
-                    how = "камерой" if self.simulator.aim_by_camera else "лазером"
-                    warn = self.simulator.warning()
-                    sim_info.setText(
-                        f"Симулятор: наведено {how}." + (f"<br><b style='color:#c62828'>{warn}</b>" if warn else "")
-                    )
-
-                take_simulator_dro()
-                btn_dro = QtWidgets.QPushButton("Взять DRO из симулятора")
-                btn_dro.clicked.connect(take_simulator_dro)
-                dialog_layout.addWidget(btn_dro)
-                dialog_layout.addWidget(sim_info)
-
-            button_box = QtWidgets.QDialogButtonBox(
-                QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel, dialog
-            )
-            button_box.accepted.connect(dialog.accept)
-            button_box.rejected.connect(dialog.reject)
-            dialog_layout.addWidget(button_box)
-
-            if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-                mach_x = spin_x.value()
-                mach_y = spin_y.value()
-
-                if cb_add_cam.isChecked():
-                    mach_x += cam_x
-                    mach_y += cam_y
-
-                self.manual_mach_pts[point_idx] = (mach_x, mach_y, cb_add_cam.isChecked())
-
-                cam_label = " (+Камера)" if cb_add_cam.isChecked() else ""
-                buttons[point_idx].setText(
-                    f"Т{point_idx + 1}: Сетка({scene_x:.4f}, {-scene_y:.4f}) "
-                    f"-> Ст({mach_x:.4f}, {mach_y:.4f}){cam_label}"
-                )
-                buttons[point_idx].setStyleSheet("background-color: #c8e6c9; font-weight: bold;")
-
-                p1_3_ready = all(pt is not None for pt in self.manual_file_pts[:3]) and all(
-                    pt is not None for pt in self.manual_mach_pts[:3]
-                )
-                p4_enabled = self.cb_use_pt4.isChecked()
-                p4_ready = (
-                    self.manual_file_pts[3] is not None and self.manual_mach_pts[3] is not None if p4_enabled else True
+        if self.simulator:
+            # Режим --test: координаты станка берем у виртуального станка, как оператор с экрана DRO
+            def take_simulator_dro():
+                dro = self.simulator.dro()
+                if dro:
+                    spin_x.setValue(dro[0])
+                    spin_y.setValue(dro[1])
+                    # Наведено камерой — DRO дополняется смещением камеры, лазером — нет
+                    cb_add_cam.setChecked(self.simulator.aim_by_camera)
+                how = "камерой" if self.simulator.aim_by_camera else "лазером"
+                warn = self.simulator.warning()
+                source_label.setText(
+                    f"Симулятор: наведено {how}." + (f"<br><b style='color:#c62828'>{warn}</b>" if warn else "")
                 )
 
-                if p1_3_ready and p4_ready:
-                    self.calculate_manual_affine_matrix()
-            else:
-                self.manual_file_pts[point_idx] = None
-                self.redraw_calibration_markers()
-                buttons[point_idx].setText(f"Зафиксировать Точку {point_idx + 1}")
-                buttons[point_idx].setStyleSheet("")
-        except Exception as e:
-            print("\n" + "=" * 40 + " Сбой работы окна ввода " + "=" * 40)
-            traceback.print_exc()
-            print("=" * 105 + "\n")
-            QtWidgets.QMessageBox.critical(self, "Ошибка", f"Сбой работы окна ввода: {str(e)}")
+            take_simulator_dro()
+            btn_dro = QtWidgets.QPushButton("Взять DRO из симулятора")
+            btn_dro.clicked.connect(take_simulator_dro)
+            dialog_layout.addWidget(btn_dro)
+        elif not paste_clipboard(False):
+            source_label.setText("Подставлены координаты прицела — замените их показаниями станка.")
+        dialog_layout.addWidget(source_label)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel, dialog
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        dialog_layout.addWidget(button_box)
+
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            # Отмена — возвращаем прежнее состояние точки
+            self.manual_file_pts[point_idx], self.manual_mach_pts[point_idx] = previous
+            self.redraw_calibration_markers()
+            return
+
+        mach_x, mach_y = spin_x.value(), spin_y.value()
+        if cb_add_cam.isChecked():
+            mach_x += cam_x
+            mach_y += cam_y
+        self.manual_mach_pts[point_idx] = (mach_x, mach_y, cb_add_cam.isChecked())
+
+        cam_label = " (+Камера)" if cb_add_cam.isChecked() else ""
+        self.point_buttons[point_idx].setText(
+            f"Т{point_idx + 1}: Сетка({scene_x:.4f}, {-scene_y:.4f}) -> Ст({mach_x:.4f}, {mach_y:.4f}){cam_label}"
+        )
+        self.point_buttons[point_idx].setToolTip(self.point_buttons[point_idx].text())
+        self.point_buttons[point_idx].setStyleSheet(DONE_STYLE)
+        self.recalculate_calibration()
 
     def redraw_calibration_markers(self):
         """Рисует отметки реперов по их локальным координатам платы в текущей системе экрана.
-        После расчета матрицы отметки должны лечь точно на реперы — это визуальная проверка калибровки."""
+        После привязки отметки должны лечь точно на реперы — это визуальная проверка."""
         for marker in self.manual_markers:
             try:
                 if marker is not None and marker.scene() is self.view.scene:
                     self.view.scene.removeItem(marker)
             except RuntimeError:
                 pass  # объект уже удален вместе со scene.clear()
-        self.manual_markers = [None, None, None, None]
+        self.manual_markers = [None] * POINT_COUNT
         if not self.geo_context or not self.cb_enable_calib.isChecked():
             return
 
         self.sync_geometry_context()
-        colors = ["#ff1744", "#2979ff", "#00e676", "#e040fb"]
         for idx, pt in enumerate(self.manual_file_pts):
             if pt is None:
                 continue
             x, y = self.geo_context.local_to_display(*pt)
             marker = QtWidgets.QGraphicsEllipseItem(x - 0.4, -y - 0.4, 0.8, 0.8)
-            marker.setBrush(QtGui.QBrush(QtGui.QColor(colors[idx])))
+            marker.setBrush(QtGui.QBrush(QtGui.QColor(POINT_COLORS[idx])))
             marker.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.15))
             marker.setZValue(10)
             self.view.scene.addItem(marker)
             self.manual_markers[idx] = marker
 
-    def calculate_manual_affine_matrix(self):
-        """Расчет аффинной матрицы, автоматически адаптирующийся под 3 или 4 точки методом МНК"""
-        try:
-            valid_indices = [
-                i for i in range(4) if self.manual_file_pts[i] is not None and self.manual_mach_pts[i] is not None
-            ]
-            if len(valid_indices) < 3:
-                return
+    # ------------------------------------------------------------------ превью и G-код
 
-            try:
-                coeffs = fit_affine(
-                    [self.manual_file_pts[i] for i in valid_indices],
-                    [self.manual_mach_pts[i][:2] for i in valid_indices],
-                )
-            except CalibrationError as e:
-                QtWidgets.QMessageBox.warning(self, "Внимание", str(e))
-                return
-            m11, m21, m12, m22, dx, dy = coeffs
+    def _add_machine_field(self):
+        """Рабочее поле станка и мертвая зона камеры на сцене (под рисунком платы)"""
+        config = self.machine_config()
+        field_item = self.view.scene.addRect(
+            QtCore.QRectF(0, -config.field_h, config.field_w, config.field_h),
+            QtGui.QPen(QtGui.QColor("#607d8b"), 0, QtCore.Qt.PenStyle.DashLine),
+        )
+        field_item.setZValue(-2)
+        dead, _ = shapely_to_qt_paths(camera_dead_zone(config))
+        dead_item = self.view.scene.addPath(
+            dead, QtGui.QPen(QtCore.Qt.PenStyle.NoPen), QtGui.QBrush(QtGui.QColor(255, 82, 82, 45))
+        )
+        dead_item.setToolTip("Мертвая зона камеры: сюда камеру навести нельзя, реперы здесь наводите лазером")
+        dead_item.setZValue(-1)
 
-            # Точка платы под прицелом до смены системы координат экрана
-            self.sync_geometry_context()
-            center_x, center_y = self.view.get_center_board_coordinates()
-            local_center = self.geo_context.display_to_local(center_x, -center_y)
-
-            self.matrix_coeffs = coeffs
-            self.use_calibration = True
-
-            pts_count = len(valid_indices)
-            self.calib_info_label.setText(f"Базирование по {pts_count} точкам: {describe_affine(coeffs)}")
-
-            self.update_interactive_preview()
-
-            # Экран теперь в координатах станка — рисунок переехал. Возвращаем ту же точку платы под прицел
-            new_x, new_y = self.geo_context.local_to_display(*local_center)
-            self.view.centerOn(new_x, -new_y)
-
-            # АВТОСОХРАНЕНИЕ КАЛИБРОВКИ В INI:
-            self.settings.setValue("calib_matrix_active", "true")
-            self.settings.setValue("mat_m11", float(m11))
-            self.settings.setValue("mat_m21", float(m21))
-            self.settings.setValue("mat_m12", float(m12))
-            self.settings.setValue("mat_m22", float(m22))
-            self.settings.setValue("mat_dx", float(dx))
-            self.settings.setValue("mat_dy", float(dy))
-
-            # Сохраняем текстовые подписи кнопок
-            for idx in valid_indices:
-                if self.manual_file_pts[idx] and self.manual_mach_pts[idx]:
-                    self.settings.setValue(f"pt_file_{idx}_x", float(self.manual_file_pts[idx][0]))
-                    self.settings.setValue(f"pt_file_{idx}_y", float(self.manual_file_pts[idx][1]))
-                    self.settings.setValue(f"pt_mach_{idx}_x", float(self.manual_mach_pts[idx][0]))
-                    self.settings.setValue(f"pt_mach_{idx}_y", float(self.manual_mach_pts[idx][1]))
-                    if len(self.manual_mach_pts[idx]) > 2:
-                        self.settings.setValue(
-                            f"pt_mach_{idx}_cam", "true" if self.manual_mach_pts[idx][2] else "false"
-                        )
-            self.settings.sync()
-
-        except Exception as e:
-            print("\n" + "=" * 40 + " ОШИБКА АФФИННОЙ МАТРИЦЫ " + "=" * 40)
-            traceback.print_exc()
-            print("=" * 105 + "\n")
-            QtWidgets.QMessageBox.critical(
-                self, "Ошибка расчета", f"Не удалось рассчитать коэффициенты трансформации: {str(e)}"
-            )
-            self.use_calibration = False
+    def _field_and_calibration_lines(self, bounds):
+        """Строки статуса о привязке и о поле станка; второй элемент — True, если плата не помещается"""
+        if not (self.use_calibration and self.matrix_coeffs):
+            # Без привязки ноль — рабочий ноль, выставленный оператором: с полем станка не сравниваем
+            return ["Без привязки: плата прижата к нулю станка."], False
+        lines = [f"Привязка: {short_description(self.matrix_coeffs)}"]
+        overflow = travel_overflow(bounds, self.spin_overscan.value(), self.machine_config())
+        if overflow > 1e-9:
+            lines.append(f"ВНИМАНИЕ: проход выходит за рабочее поле станка на {overflow:.2f} мм!")
+        return lines, overflow > 1e-9
 
     def update_interactive_preview(self):
         """Интерактивное превью. Рисует ту же геометрию, что пойдет в G-код (единый конвейер трансформаций)"""
@@ -756,7 +703,8 @@ class LaserConverterApp(QtWidgets.QWidget):
 
         try:
             self.view.scene.clear()
-            self.manual_markers = [None, None, None, None]
+            self.manual_markers = [None] * POINT_COUNT
+            self._add_machine_field()
 
             rx_min, ry_min, rx_max, ry_max = self.geo_context.get_raw_bounds()
             if rx_max - rx_min <= 0 or ry_max - ry_min <= 0:
@@ -787,16 +735,19 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.view.scene.addItem(home_marker)
             self.redraw_calibration_markers()
 
-            # Выводим оператору физические координаты линеек станка
+            extra, overflow = self._field_and_calibration_lines(bounds)
             self.status_label.setText(
-                (
-                    f"Статус: Геометрия готова.\n"
-                    f"Размер из файла: {rx_max - rx_min:.2f} x {ry_max - ry_min:.2f} мм\n"
-                    f"Размер маски платы (на станке): {min_x:.2f} ... {max_x:.2f} мм\n"
-                    f"Габарит хода башки X (ЧПУ DRO): [ {min_x - ovr:.2f} ... {max_x + ovr:.2f} ] мм"
+                "\n".join(
+                    [
+                        "Статус: Геометрия готова.",
+                        f"Размер из файла: {rx_max - rx_min:.2f} x {ry_max - ry_min:.2f} мм",
+                        f"Плата на станке по X: {min_x:.2f} ... {max_x:.2f} мм",
+                        f"Габарит хода башки X (ЧПУ DRO): [ {min_x - ovr:.2f} ... {max_x + ovr:.2f} ] мм",
+                        *extra,
+                    ]
                 )
             )
-            self.status_label.setStyleSheet("color: #2e7d32; font-weight: bold;")
+            self.status_label.setStyleSheet(f"color: {'#c62828' if overflow else '#2e7d32'}; font-weight: bold;")
 
         except Exception as e:
             print("\n" + "=" * 40 + " ОШИБКА ПРЕВЬЮ " + "=" * 40)
@@ -805,7 +756,7 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.status_label.setStyleSheet("color: red;")
 
     def process_conversion(self):
-        """Расчет траекторий сканирования и генерация G-кода через ООП-контекст геометрии"""
+        """Расчет траекторий сканирования и генерация G-кода"""
         if not self.geo_context:
             return
         self.save_current_settings()
@@ -830,7 +781,7 @@ class LaserConverterApp(QtWidgets.QWidget):
         try:
             self.sync_geometry_context()
 
-            # Геометрия прожига в координатах станка: в обычном режиме прижата к (0,0), при калибровке — по реперам
+            # Геометрия прожига в координатах станка: без привязки прижата к (0,0), с привязкой — по реперам
             burn_geom, bounds = self.geo_context.get_burn_geometry(invert=self.cb_invert.isChecked())
             if burn_geom is None:
                 return
@@ -838,6 +789,7 @@ class LaserConverterApp(QtWidgets.QWidget):
             toolpath = generate_gcode(burn_geom, bounds, params)
             self.generated_gcode = toolpath.gcode
             self.view.scene.clear()
+            self._add_machine_field()
             self.view.setBackgroundBrush(QtGui.QColor("#f0f0f0"))
 
             burn_path, travel_path = toolpath_to_qt_paths(toolpath)
@@ -865,8 +817,11 @@ class LaserConverterApp(QtWidgets.QWidget):
             self.btn_save.setDisabled(False)
             if self.simulator:
                 self.simulator.show_burn(toolpath.gcode, self.cb_invert.isChecked(), params.step)
-            self.status_label.setText(f"Статус: Успешно! Траектория построена ({toolpath.lines_count} строк).")
-            self.status_label.setStyleSheet("color: green;")
+            extra, overflow = self._field_and_calibration_lines(bounds)
+            self.status_label.setText(
+                "\n".join([f"Статус: Успешно! Траектория построена ({toolpath.lines_count} строк).", *extra])
+            )
+            self.status_label.setStyleSheet("color: #c62828;" if overflow else "color: green;")
         except Exception as e:
             print("\n" + "=" * 40 + " Ошибка вычислений " + "=" * 40)
             traceback.print_exc()

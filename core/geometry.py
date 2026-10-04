@@ -20,12 +20,6 @@ class GerberGeometryContext:
         self.flip_x = False
         self.flip_y = False
 
-        # Смещение камеры и оверскан вылета каретки
-        self.camera_offset_x = 0.0
-        self.camera_offset_y = 0.0
-        self.use_camera_offset = False
-        self.overscan = 0.0
-
         # Коэффициенты аффинного базирования по точкам станка
         self.matrix_coeffs = None
         self.use_calibration = False
@@ -70,8 +64,6 @@ class GerberGeometryContext:
         if self.use_calibration and self.matrix_coeffs:
             m11, m21, m12, m22, dx, dy = self.matrix_coeffs
             return m11 * x + m21 * y + dx, m12 * x + m22 * y + dy
-        if self.use_camera_offset:
-            return x + self.camera_offset_x, y + self.camera_offset_y
         return x, y
 
     def display_to_local(self, x, y):
@@ -83,8 +75,6 @@ class GerberGeometryContext:
                 raise ValueError("Матрица калибровки вырождена — точки лежат на одной прямой?")
             px, py = x - dx, y - dy
             return (m22 * px - m21 * py) / det, (-m12 * px + m11 * py) / det
-        if self.use_camera_offset:
-            return x - self.camera_offset_x, y - self.camera_offset_y
         return x, y
 
     def _flip_rotate(self, geom, center):
@@ -134,11 +124,10 @@ class GerberGeometryContext:
         geom = translate(geom, xoff=-rot_xmin, yoff=-rot_ymin)
 
         if self.use_calibration and self.matrix_coeffs:
-            # РЕЖИМ 1: Применяем калибровку МНК по реперам
+            # Привязка к станку по реперным точкам
             return affine_transform(geom, self.matrix_coeffs)
-        # РЕЖИМ 2: Обычный ручной режим (просто прибавляем смещение камеры)
-        if self.use_camera_offset:
-            geom = translate(geom, xoff=self.camera_offset_x, yoff=self.camera_offset_y)
+        # Без привязки плата прижата к нулю станка. Смещение камеры здесь не участвует:
+        # оно учитывается только у точек, наведенных камерой
         return geom
 
 

@@ -16,12 +16,7 @@ from shapely.affinity import affine_transform
 from shapely.geometry import MultiLineString, box
 from shapely.ops import unary_union
 
-
-@dataclass
-class MachineConfig:
-    field_w: float = 165.0  # рабочее поле станка по X, мм
-    field_h: float = 95.0  # рабочее поле станка по Y, мм
-    camera_offset: tuple = (42.9, 0.55)  # положение камеры относительно лазера (Лазер -> Камера), мм
+from core.machine import MachineConfig, camera_dead_zone
 
 
 @dataclass
@@ -197,10 +192,7 @@ class VirtualMachine:
 
     def camera_dead_zone(self):
         """Часть поля, которую камера увидеть не может"""
-        ox, oy = self.config.camera_offset
-        field_rect = box(0, 0, self.config.field_w, self.config.field_h)
-        seen = box(ox, oy, self.config.field_w + ox, self.config.field_h + oy)
-        return field_rect.difference(seen)
+        return camera_dead_zone(self.config)
 
     # --- прожиг ---
 

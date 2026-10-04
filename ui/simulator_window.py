@@ -122,16 +122,17 @@ class SimulatorWindow(QtWidgets.QWidget):
         self.spin_cam_x = spin(2, "Камера X (Лазер -> Камера):", camera_offset[0], -500, 500, 4)
         self.spin_cam_y = spin(3, "Камера Y (Лазер -> Камера):", camera_offset[1], -500, 500, 4)
         self.spin_rotation = spin(4, "Макс. поворот платы (°):", 5.0, 0, 45, 1, 0.5)
+        self.spin_scale = spin(5, "Макс. усадка платы (%):", 0.2, 0, 5, 2, 0.05)
 
         self.cb_mirror = QtWidgets.QCheckBox("Плата нижним слоем (зеркально по X)")
         self.cb_mirror.stateChanged.connect(self.relayout)
-        grid.addWidget(self.cb_mirror, 5, 0, 1, 2)
+        grid.addWidget(self.cb_mirror, 6, 0, 1, 2)
 
         self.seed_label = QtWidgets.QLabel()
-        grid.addWidget(self.seed_label, 6, 0)
+        grid.addWidget(self.seed_label, 7, 0)
         btn_new = QtWidgets.QPushButton("Новая укладка")
         btn_new.clicked.connect(self.new_layout)
-        grid.addWidget(btn_new, 6, 1)
+        grid.addWidget(btn_new, 7, 1)
         form.addWidget(machine_group)
 
         # Истинное положение платы — то, что калибровка в основном окне должна «угадать»
@@ -214,6 +215,7 @@ class SimulatorWindow(QtWidgets.QWidget):
             config=self.config(),
             seed=self.seed,
             max_rotation=self.spin_rotation.value(),
+            max_scale_error=self.spin_scale.value() / 100.0,
             mirror_x=self.cb_mirror.isChecked(),
         )
         self._build_scene()

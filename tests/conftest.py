@@ -31,7 +31,6 @@ BASE = dict(
     invert=False,
     flip_x=False,
     flip_y=False,
-    cam=None,
     calib=None,
 )
 
@@ -41,7 +40,6 @@ CONFIGS = {
     "invert": dict(invert=True),
     "flipx_rot30_nosnake": dict(flip_x=True, rotate=30.0, snake=False),
     "flipy_rotm12_invert": dict(flip_y=True, rotate=-12.5, invert=True),
-    "camera": dict(cam=(42.9, 0.55)),
     "calib": dict(calib=CALIB, rotate=90.0),
     "m3_params": dict(laser_mode="M3", contour_power=35, power=200, feed=12000, step=0.05, overscan=5.0),
 }
@@ -64,9 +62,6 @@ def make_context(sample, cfg):
     ctx.rotate_angle = cfg["rotate"]
     ctx.flip_x = cfg["flip_x"]
     ctx.flip_y = cfg["flip_y"]
-    if cfg["cam"]:
-        ctx.use_camera_offset = True
-        ctx.camera_offset_x, ctx.camera_offset_y = cfg["cam"]
     if cfg["calib"]:
         ctx.use_calibration = True
         ctx.matrix_coeffs = cfg["calib"]

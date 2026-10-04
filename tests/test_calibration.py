@@ -48,16 +48,13 @@ def test_fit_affine_needs_three_points():
 
 def _context(mode):
     ctx = GerberGeometryContext([])
-    if mode == "camera":
-        ctx.use_camera_offset = True
-        ctx.camera_offset_x, ctx.camera_offset_y = 42.9, -0.55
-    elif mode == "calib":
+    if mode == "calib":
         ctx.use_calibration = True
         ctx.matrix_coeffs = CALIB
     return ctx
 
 
-@pytest.mark.parametrize("mode", ["plain", "camera", "calib"])
+@pytest.mark.parametrize("mode", ["plain", "calib"])
 def test_display_local_roundtrip(mode):
     """Точка, снятая с экрана, возвращается в координаты платы в любом режиме отображения"""
     ctx = _context(mode)

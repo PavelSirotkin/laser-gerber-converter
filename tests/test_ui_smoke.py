@@ -41,7 +41,11 @@ def test_window_preview_and_gcode(qapp):
     w.spin_overscan.setValue(cfg["overscan"])
 
     w.update_interactive_preview()
-    scene_rect = w.view.scene.itemsBoundingRect()
+    # Рисунок платы — элементы сцены над полем станка (поле и мертвая зона камеры лежат ниже, z < 0)
+    board_items = [it for it in w.view.scene.items() if it.zValue() == 0]
+    scene_rect = board_items[0].sceneBoundingRect()
+    for it in board_items[1:]:
+        scene_rect = scene_rect.united(it.sceneBoundingRect())
     burn_geom, (xmin, ymin, xmax, ymax) = make_context("test.gbr", cfg).get_burn_geometry()
     assert scene_rect.right() == pytest.approx(xmax, abs=1e-6)
     assert -scene_rect.top() == pytest.approx(ymax, abs=1e-6)
