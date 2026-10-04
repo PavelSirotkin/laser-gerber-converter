@@ -173,7 +173,7 @@ def scanline_intervals(geom, ys, x_from, x_to):
             return []
         ex1, ey1, ex2, ey2 = x1[:n][sel], y1[:n][sel], x2[:n][sel], y2[:n][sel]
         xs = np.sort(ex1 + (y - ey1) * (ex2 - ex1) / (ey2 - ey1))
-        return [(float(a), float(b)) for a, b in zip(xs[0::2], xs[1::2]) if b > a]
+        return [(float(a), float(b)) for a, b in zip(xs[0::2], xs[1::2], strict=False) if b > a]
 
     # Строка может пройти ровно по горизонтальному ребру (координаты Gerber часто на той же сетке).
     # Граница считается частью фигуры, как в shapely: объединяем срезы чуть ниже и чуть выше строки.

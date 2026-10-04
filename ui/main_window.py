@@ -364,8 +364,8 @@ class LaserConverterApp(QtWidgets.QWidget):
                             buttons[idx].setStyleSheet("background-color: #c8e6c9; font-weight: bold;")
 
                     self.cb_enable_calib.setChecked(True)
-                except:
-                    pass
+                except (TypeError, ValueError) as e:
+                    print(f"Ошибка загрузки калибровки из INI: {e}")
 
         except Exception as e:
             print(f"Ошибка инициализации INI: {str(e)}")
@@ -600,7 +600,8 @@ class LaserConverterApp(QtWidgets.QWidget):
 
                 cam_label = " (+Камера)" if cb_add_cam.isChecked() else ""
                 buttons[point_idx].setText(
-                    f"Т{point_idx + 1}: Сетка({scene_x:.4f}, {-scene_y:.4f}) -> Ст({mach_x:.4f}, {mach_y:.4f}){cam_label}"
+                    f"Т{point_idx + 1}: Сетка({scene_x:.4f}, {-scene_y:.4f}) "
+                    f"-> Ст({mach_x:.4f}, {mach_y:.4f}){cam_label}"
                 )
                 buttons[point_idx].setStyleSheet("background-color: #c8e6c9; font-weight: bold;")
 

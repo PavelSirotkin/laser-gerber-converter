@@ -75,5 +75,5 @@ def test_burn_and_travel_segments_cover_scan_line():
     for y in {s[0] for s in tp.burn_segments}:
         parts = sorted([(min(a, b), max(a, b)) for yy, a, b in tp.burn_segments + tp.travel_segments if yy == y])
         assert parts[0][0] == -2.0 and parts[-1][1] == 12.0
-        assert all(a[1] == b[0] for a, b in zip(parts, parts[1:]))
+        assert all(a[1] == b[0] for a, b in zip(parts, parts[1:], strict=False))
     assert sum(b - a for _, a, b in tp.burn_segments) == pytest.approx(8.0 * 2)

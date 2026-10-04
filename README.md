@@ -118,6 +118,13 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
+Проверка стиля и типичных ошибок — [ruff](https://docs.astral.sh/ruff/) (настройки в `pyproject.toml`):
+
+```bash
+python -m ruff check .
+python -m ruff format .
+```
+
 Тест `tests/test_gcode.py::test_gcode_matches_golden` сверяет G-код для файлов из `samples/` с эталонными хешами в `tests/data/golden_gcode.json`. Если формат G-кода меняется намеренно, эталон нужно перегенерировать.
 
 ---

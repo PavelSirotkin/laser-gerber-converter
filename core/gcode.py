@@ -59,7 +59,7 @@ def generate_gcode(burn_geom, bounds, params):
 
     burn, travel = [], []
     direction_right = True
-    for current_y, segments_coords in zip(scan_ys, all_segments):
+    for current_y, segments_coords in zip(scan_ys, all_segments, strict=True):
         for s_x, e_x in segments_coords:
             burn.append((current_y, s_x, e_x))
 

@@ -25,7 +25,7 @@ def test_fit_affine_least_squares_averages_error():
     mach_pts = [apply(CALIB, *p) for p in file_pts]
     mach_pts[3] = (mach_pts[3][0] + 0.2, mach_pts[3][1])
     coeffs = fit_affine(file_pts, mach_pts)
-    residuals = [math.dist(apply(coeffs, *f), m) for f, m in zip(file_pts, mach_pts)]
+    residuals = [math.dist(apply(coeffs, *f), m) for f, m in zip(file_pts, mach_pts, strict=True)]
     assert max(residuals) < 0.2
 
 
