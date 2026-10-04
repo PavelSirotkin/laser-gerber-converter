@@ -29,12 +29,9 @@ class GerberGeometryContext:
         self.flip_x = False
         self.flip_y = False
         
-        # Смещение камеры и оверскан вылета каретки
-        self.camera_offset_x = 0.0
-        self.camera_offset_y = 0.0
-        self.use_camera_offset = False
+        # Смещение вылета каретки
         self.overscan = 0.0
-        
+
         # Коэффициенты аффинного базирования по точкам станка
         self.matrix_coeffs = None
         self.use_calibration = False
@@ -63,30 +60,8 @@ class GerberGeometryContext:
             merged = box(*bounds).difference(merged)
         return merged, bounds
 
-    def local_to_display(self, x, y):
-        """Точка в локальных координатах платы (после зеркал/поворота, прижата к 0,0) -> координаты экрана/станка"""
-        if self.use_calibration and self.matrix_coeffs:
-            m11, m21, m12, m22, dx, dy = self.matrix_coeffs
-            return m11 * x + m21 * y + dx, m12 * x + m22 * y + dy
-        if self.use_camera_offset:
-            return x + self.camera_offset_x, y + self.camera_offset_y
-        return x, y
-
-    def display_to_local(self, x, y):
-        """Обратное преобразование: координаты экрана/станка -> локальные координаты платы"""
-        if self.use_calibration and self.matrix_coeffs:
-            m11, m21, m12, m22, dx, dy = self.matrix_coeffs
-            det = m11 * m22 - m21 * m12
-            if abs(det) < 1e-12:
-                raise ValueError("Матрица калибровки вырождена — точки лежат на одной прямой?")
-            px, py = x - dx, y - dy
-            return (m22 * px - m21 * py) / det, (-m12 * px + m11 * py) / det
-        if self.use_camera_offset:
-            return x - self.camera_offset_x, y - self.camera_offset_y
-        return x, y
-
     def get_transformed_elements(self):
-        """Возвращает массив геометрий со всеми примененными смещениями."""
+        """Возвращает массив геометрий со всеми примененными смещениями ЧПУ."""
         if not self.raw_geometries:
             return []
 
@@ -94,7 +69,6 @@ class GerberGeometryContext:
         geom_center = (raw_xmin + (raw_xmax - raw_xmin) / 2.0, raw_ymin + (raw_ymax - raw_ymin) / 2.0)
 
         # Шаг А: Сначала ВСЕГДА применяем базовые ручные трансформации интерфейса (Зеркала и Поворот)
-        # Это нужно и для обычного режима, и для калибровки по 3-м точкам!
         temp_geoms = []
         for geom in self.raw_geometries:
             if self.flip_x or self.flip_y:
@@ -108,28 +82,23 @@ class GerberGeometryContext:
             temp_geoms.append(geom)
 
         # Находим новые минимальные границы повернутого облака векторов платы
-        all_bounds = [g.bounds for g in temp_geoms]
-        rot_xmin = min(b[0] for b in all_bounds)
-        rot_ymin = min(b[1] for b in all_bounds)
+        all_bounds = [g.bounds for g in temp_geoms if g.bounds]
+        rot_xmin = min(b[0] for b in all_bounds) if all_bounds else 0.0
+        rot_ymin = min(b[1] for b in all_bounds) if all_bounds else 0.0
 
-        # Шаг Б: Применяем позиционирование станка / камеры
+        # Шаг Б: Применяем позиционирование станка ЧПУ (без смещения камеры)
         transformed = []
         for geom in temp_geoms:
             # Сдвигаем повернутую плату к локальному нулю (0,0) ее новых повернутых габаритов
             geom = translate(geom, xoff=-rot_xmin, yoff=-rot_ymin)
 
             if self.use_calibration and self.matrix_coeffs:
-                # РЕЖИМ 1: Применяем калибровку МНК ЧПУ поверх уже повернутой на 90 градусов платы!
+                # РЕЖИМ ЧПУ: Применяем МНК-матрицу калибровки
                 geom = affine_transform(geom, self.matrix_coeffs)
-            else:
-                # РЕЖИМ 2: Обычный ручной режим (просто прибавляем смещение камеры)
-                if self.use_camera_offset:
-                    geom = translate(geom, xoff=self.camera_offset_x, yoff=self.camera_offset_y)
 
             transformed.append(geom)
             
         return transformed
-
 
 def _collect_edges(geom):
     """Все ребра полигонов (x1, y1, x2, y2) и прочие (неплощадные) части геометрии"""
@@ -153,7 +122,7 @@ def _collect_edges(geom):
     return edges, others
 
 
-def scanline_intervals(geom, ys, x_from, x_to):
+def scanline_intervals(geom, ys):
     """Отрезки прожига [(x_start, x_end), ...] для каждой строки Y.
     Пересечения строки с ребрами полигонов считаются векторно (правило even-odd — корректно,
     т.к. после unary_union дырки являются настоящими interiors). Линии/точки нулевой ширины
@@ -179,19 +148,6 @@ def scanline_intervals(geom, ys, x_from, x_to):
     result = []
     for y in ys:
         segs = crossings(y - eps) + crossings(y + eps)
-
-        if others:
-            scan_line = LineString([(x_from, y), (x_to, y)])
-            for g in others:
-                hit = scan_line.intersection(g)
-                for part in getattr(hit, 'geoms', [hit]):
-                    if part.is_empty:
-                        continue
-                    if part.geom_type == 'Point':
-                        segs.append((part.x - 0.005, part.x + 0.005))
-                    elif part.geom_type == 'LineString':
-                        xa, xb = part.coords[0][0], part.coords[-1][0]
-                        segs.append((min(xa, xb), max(xa, xb)))
 
         # Слияние перекрывающихся отрезков
         segs.sort()
@@ -442,7 +398,7 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.load_saved_settings()
 
     def init_ui(self):
-        self.setWindowTitle("LaserGRBL Raster Converter & Native Visualizer (OOP-Engine)")
+        self.setWindowTitle("LaserGRBL Raster Converter & Native Visualizer")
         self.setMinimumWidth(1150)
         self.setMinimumHeight(760)
 
@@ -468,61 +424,64 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.file_layout.addWidget(self.btn_browse)
         self.left_layout.addWidget(self.file_group)
 
-        # БЛОК 2: Параметры лазера и станка ЧПУ
+        # БЛОК 2: Параметры лазера и станка ЧПУ (Сетка упорядочена от 0 до 6)
         self.param_group = QtWidgets.QGroupBox("Параметры лазера и станка")
         self.param_grid = QtWidgets.QGridLayout()
         self.param_group.setLayout(self.param_grid)
 
+        # Строка 0: Режим лазера
         self.param_grid.addWidget(QtWidgets.QLabel("Режим лазера GRBL:"), 0, 0)
         self.combo_laser_mode = QtWidgets.QComboBox()
         self.combo_laser_mode.addItems(["M4 (Динамическая мощность)", "M3 (Постоянная мощность)"])
         self.param_grid.addWidget(self.combo_laser_mode, 0, 1)
 
-        self.param_grid.addWidget(QtWidgets.QLabel("Мощность для контура (S):"), 1, 0)
-        self.spin_contour_power = QtWidgets.QSpinBox()
-        self.spin_contour_power.setRange(0, 1000)
-        self.spin_contour_power.setValue(10)
-        self.spin_contour_power.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_contour_power, 1, 1)
-
-        self.param_grid.addWidget(QtWidgets.QLabel("Макс. мощность лазера (S):"), 2, 0)
+        # Строка 1: Макс. мощность лазера
+        self.param_grid.addWidget(QtWidgets.QLabel("Макс. мощность лазера (S):"), 1, 0)
         self.spin_power = QtWidgets.QSpinBox()
-        self.spin_power.setRange(1, 1000)
-        self.spin_power.setValue(1000)
+        self.spin_power.setRange(1, 2000)
+        self.spin_power.setValue(255)
         self.spin_power.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_power, 2, 1)
+        self.param_grid.addWidget(self.spin_power, 1, 1)
 
-        self.param_grid.addWidget(QtWidgets.QLabel("Скорость гравировки (мм/мин):"), 3, 0)
+        # Строка 2: Скорость гравировки
+        self.param_grid.addWidget(QtWidgets.QLabel("Скорость гравировки (мм/мин):"), 2, 0)
         self.spin_feed = QtWidgets.QSpinBox()
-        self.spin_feed.setRange(1, 30000)
+        self.spin_feed.setRange(10, 20000)
         self.spin_feed.setValue(1500)
         self.spin_feed.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_feed, 3, 1)
+        self.param_grid.addWidget(self.spin_feed, 2, 1)
 
-        self.param_grid.addWidget(QtWidgets.QLabel("Шаг строки / Луч (мм):"), 4, 0)
+        # Строка 3: Шаг строки / луч
+        self.param_grid.addWidget(QtWidgets.QLabel("Шаг строки / Луч (мм):"), 3, 0)
         self.spin_step = QtWidgets.QDoubleSpinBox()
         self.spin_step.setDecimals(4)
-        self.spin_step.setRange(0.0010, 10.0000)
+        self.spin_step.setRange(0.0010, 2.0000)
         self.spin_step.setSingleStep(0.01)
         self.spin_step.setValue(0.1000)
         self.spin_step.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_step, 4, 1)
+        self.param_grid.addWidget(self.spin_step, 3, 1)
 
-        self.param_grid.addWidget(QtWidgets.QLabel("Вылет каретки Overscan (мм):"), 5, 0)
+        # Строка 4: Вылет каретки Overscan
+        self.param_grid.addWidget(QtWidgets.QLabel("Вылет каретки Overscan (мм):"), 4, 0)
         self.spin_overscan = QtWidgets.QDoubleSpinBox()
-        self.spin_overscan.setDecimals(1)
         self.spin_overscan.setRange(0.0, 50.0)
         self.spin_overscan.setValue(2.0)
-        self.spin_overscan.setSingleStep(0.5)
         self.spin_overscan.installEventFilter(self)
-        self.param_grid.addWidget(self.spin_overscan, 5, 1)
+        self.param_grid.addWidget(self.spin_overscan, 4, 1)
 
+        # Строка 5: Мощность для контура
+        self.param_grid.addWidget(QtWidgets.QLabel("Мощность для контура (S):"), 5, 0)
+        self.spin_contour_power = QtWidgets.QSpinBox()
+        self.spin_contour_power.setRange(0, 2000)
+        self.spin_contour_power.setValue(35)
+        self.spin_contour_power.installEventFilter(self)
+        self.param_grid.addWidget(self.spin_contour_power, 5, 1)
+
+        # Строка 6: Точный поворот стола
         self.param_grid.addWidget(QtWidgets.QLabel("Точный поворот стола (град):"), 6, 0)
         self.spin_rotate = QtWidgets.QDoubleSpinBox()
-        self.spin_rotate.setDecimals(4)
-        self.spin_rotate.setRange(-360.000, 360.000)
-        self.spin_rotate.setSingleStep(0.01)
-        self.spin_rotate.setValue(0.000)
+        self.spin_rotate.setRange(-360.0, 360.0)
+        self.spin_rotate.setValue(0.0)
         self.spin_rotate.installEventFilter(self)
         self.param_grid.addWidget(self.spin_rotate, 6, 1)
         self.left_layout.addWidget(self.param_group)
@@ -542,65 +501,53 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.modes_layout.addWidget(self.cb_flip_y, 1, 1)
         self.left_layout.addWidget(self.modes_group)
 
-        # БЛОК 4: Оптическое смещение (офсет) камеры
-        self.camera_group = QtWidgets.QGroupBox("Оптическое смещение (офсет) камеры")
-        camera_main_layout = QtWidgets.QVBoxLayout()
-        self.camera_group.setLayout(camera_main_layout)
+        # БЛОК 4: Включение ручной разметки платы по точкам
+        self.cb_enable_calib = QtWidgets.QCheckBox("Включить ручную разметку платы по точкам")
+        self.cb_enable_calib.setStyleSheet("font-weight: bold; color: #0288d1; margin-top: 5px;")
+        self.cb_enable_calib.stateChanged.connect(self.toggle_manual_calibration)
+        self.left_layout.addWidget(self.cb_enable_calib)
 
-        self.cb_use_camera_offset = QtWidgets.QCheckBox("Включить компенсацию смещения камеры")
-        self.cb_use_camera_offset.setStyleSheet("font-weight: bold; color: #43a047;")
-        self.cb_use_camera_offset.stateChanged.connect(self.toggle_camera_fields_visibility)
-        camera_main_layout.addWidget(self.cb_use_camera_offset)
+        # БЛОК 5: Контейнер калибровки (Сюда засунут и весь блок смещения камеры)
+        self.calib_group = QtWidgets.QGroupBox("Базирование по центральному прицелу")
+        self.calib_layout = QtWidgets.QVBoxLayout()
+        self.calib_group.setLayout(self.calib_layout)
 
-        # Контейнер для полей ввода офсета камеры
+        # Контейнер для полей ввода офсета камеры внутри группы калибровки
         self.camera_fields_widget = QtWidgets.QWidget()
         camera_grid = QtWidgets.QGridLayout(self.camera_fields_widget)
-        camera_grid.setContentsMargins(0, 5, 0, 0)
+        camera_grid.setContentsMargins(0, 0, 0, 10)
 
-        camera_grid.addWidget(QtWidgets.QLabel("Сдвиг по X (Камера -> Лазер):"), 0, 0)
+        self.cb_use_camera_offset = QtWidgets.QCheckBox("Учитывать смещение камеры при калибровке")
+        self.cb_use_camera_offset.setStyleSheet("font-weight: bold; color: #43a047;")
+        self.cb_use_camera_offset.stateChanged.connect(self.toggle_camera_fields_visibility)
+        camera_grid.addWidget(self.cb_use_camera_offset, 0, 0, 1, 2)
+
+        camera_grid.addWidget(QtWidgets.QLabel("Сдвиг по X (Камера -> Лазер):"), 1, 0)
         self.spin_cam_offset_x = QtWidgets.QDoubleSpinBox()
         self.spin_cam_offset_x.setDecimals(4)
         self.spin_cam_offset_x.setRange(-5000.000, 5000.000)
         self.spin_cam_offset_x.setSingleStep(0.1)
         self.spin_cam_offset_x.setValue(0.000)
         self.spin_cam_offset_x.installEventFilter(self)
-        self.spin_cam_offset_x.valueChanged.connect(self.update_interactive_preview)
-        camera_grid.addWidget(self.spin_cam_offset_x, 0, 1)
+        camera_grid.addWidget(self.spin_cam_offset_x, 1, 1)
 
-        camera_grid.addWidget(QtWidgets.QLabel("Сдвиг по Y (Камера -> Лазер):"), 1, 0)
+        camera_grid.addWidget(QtWidgets.QLabel("Сдвиг по Y (Камера -> Лазер):"), 2, 0)
         self.spin_cam_offset_y = QtWidgets.QDoubleSpinBox()
         self.spin_cam_offset_y.setDecimals(4)
         self.spin_cam_offset_y.setRange(-5000.000, 5000.000)
         self.spin_cam_offset_y.setSingleStep(0.1)
         self.spin_cam_offset_y.setValue(0.000)
         self.spin_cam_offset_y.installEventFilter(self)
-        self.spin_cam_offset_y.valueChanged.connect(self.update_interactive_preview)
-        camera_grid.addWidget(self.spin_cam_offset_y, 1, 1)
+        camera_grid.addWidget(self.spin_cam_offset_y, 2, 1)
 
-        camera_main_layout.addWidget(self.camera_fields_widget)
-        self.camera_fields_widget.setVisible(False)
-        self.left_layout.addWidget(self.camera_group)
-        # БЛОК 5: Включение ручной разметки платы по точкам
-        self.cb_enable_calib = QtWidgets.QCheckBox("Включить ручную разметку платы по точкам")
-        self.cb_enable_calib.setStyleSheet("font-weight: bold; color: #0288d1; margin-top: 5px;")
-        self.cb_enable_calib.stateChanged.connect(self.toggle_manual_calibration)
-        self.left_layout.addWidget(self.cb_enable_calib)
+        self.calib_layout.addWidget(self.camera_fields_widget)
 
-        self.calib_group = QtWidgets.QGroupBox("Базирование по центральному прицелу")
-        self.calib_layout = QtWidgets.QVBoxLayout()
-        self.calib_group.setLayout(self.calib_layout)
-
-        self.cb_use_pt4 = QtWidgets.QCheckBox("Использовать 4-ю точку для коррекции деформаций")
-        self.cb_use_pt4.stateChanged.connect(self.toggle_pt4_active)
-        self.calib_layout.addWidget(self.cb_use_pt4)
-
-        # Кнопки фиксации точек станка
+        # Кнопки фиксации точек станка ЧПУ
         self.btn_pt1 = QtWidgets.QPushButton("Зафиксировать Точку 1")
         self.btn_pt2 = QtWidgets.QPushButton("Зафиксировать Точку 2")
         self.btn_pt3 = QtWidgets.QPushButton("Зафиксировать Точку 3")
         self.btn_pt4 = QtWidgets.QPushButton("Зафиксировать Точку 4")
         self.btn_pt4.setDisabled(True)
-    
 
         self.btn_pt1.clicked.connect(lambda: self.capture_point_in_crosshair(0))
         self.btn_pt2.clicked.connect(lambda: self.capture_point_in_crosshair(1))
@@ -611,10 +558,17 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.calib_layout.addWidget(self.btn_pt2)
         self.calib_layout.addWidget(self.btn_pt3)
         self.calib_layout.addWidget(self.btn_pt4)
+        
         self.left_layout.addWidget(self.calib_group)
         self.calib_group.setVisible(False)
 
-        # Подключение сигналов автоматического сохранения настроек
+        # Чекбокс 4-й точки
+        self.cb_use_pt4 = QtWidgets.QCheckBox("Использовать 4-ю точку для коррекции деформаций")
+        # self.cb_use_pt4.stateChanged.connect(self.toggle_pt4_active)
+        self.cb_use_pt4.stateChanged.connect(lambda state: self.btn_pt4.setEnabled(state == 2))
+        self.calib_layout.addWidget(self.cb_use_pt4)
+
+        # Подключение сигналов автоматического сохранения настроек в INI
         self.combo_laser_mode.currentIndexChanged.connect(self.save_current_settings)
         self.spin_contour_power.valueChanged.connect(self.save_current_settings)
         self.spin_power.valueChanged.connect(self.save_current_settings)
@@ -640,19 +594,16 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.btn_convert.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px; background-color: #0288d1; color: white;")
         self.btn_convert.clicked.connect(self.process_conversion)
         self.left_layout.addWidget(self.btn_convert)
-
         self.btn_save = QtWidgets.QPushButton("Скачать / Сохранить G-Code")
         self.btn_save.setStyleSheet("font-weight: bold; font-size: 14px; padding: 10px; background-color: #2e7d32; color: white;")
         self.btn_save.setDisabled(True)
         self.btn_save.clicked.connect(self.save_gcode_dialog)
         self.left_layout.addWidget(self.btn_save)
         self.left_layout.addStretch(1)
-
         # Правый графический холст интерактивной визуализации
         self.plot_group = QtWidgets.QGroupBox("Экран интерактивной визуализации векторов")
         self.plot_layout = QtWidgets.QVBoxLayout()
         self.plot_group.setLayout(self.plot_layout)
-
         self.view = LaserGraphicsView()
         self.plot_layout.addWidget(self.view)
         self.layout_horizontal.addWidget(self.plot_group)
@@ -675,21 +626,21 @@ class LaserConverterApp(QtWidgets.QWidget):
         self.geo_context.rotate_angle = self.spin_rotate.value()
         self.geo_context.flip_x = self.cb_flip_x.isChecked()
         self.geo_context.flip_y = self.cb_flip_y.isChecked()
-        
-        self.geo_context.use_camera_offset = self.cb_use_camera_offset.isChecked()
-        self.geo_context.camera_offset_x = self.spin_cam_offset_x.value()
-        self.geo_context.camera_offset_y = self.spin_cam_offset_y.value()
-        self.geo_context.overscan = self.spin_overscan.value()
-        
+        self.geo_context.overscan = self.spin_overscan.value()        
         self.geo_context.use_calibration = self.use_calibration
         self.geo_context.matrix_coeffs = self.matrix_coeffs
 
     def toggle_camera_fields_visibility(self, state):
-        """Показывает или скрывает поля ввода офсета камеры и обновляет интерактивное превью"""
+        """Показывает или скрывает крутилки смещения камеры внутри блока калибровки"""
         is_active = (state == 2)
-        if hasattr(self, 'camera_fields_widget'):
-            self.camera_fields_widget.setVisible(is_active)
-        self.update_interactive_preview()
+        # Находим крутилки и их текстовые метки в сетке и переключаем видимость
+        if hasattr(self, 'spin_cam_offset_x') and hasattr(self, 'spin_cam_offset_y'):
+            # Чтобы скрыть метки, найдем их через родительский layout виджета
+            for i in range(self.camera_fields_widget.layout().count()):
+                item = self.camera_fields_widget.layout().itemAt(i)
+                widget = item.widget()
+                if widget and widget != self.cb_use_camera_offset:
+                    widget.setVisible(is_active)
 
     def load_saved_settings(self):
         """Загружает последнюю сохраненную сессию конфигурации станка из INI-файла"""
@@ -915,17 +866,15 @@ class LaserConverterApp(QtWidgets.QWidget):
 
         # Считываем смещение камеры из интерфейса
         is_camera_active = hasattr(self, 'cb_use_camera_offset') and self.cb_use_camera_offset.isChecked()
-        cam_x = self.spin_cam_offset_x.value() if (is_camera_active and hasattr(self, 'spin_cam_offset_x')) else 0.0
-        cam_y = self.spin_cam_offset_y.value() if (is_camera_active and hasattr(self, 'spin_cam_offset_y')) else 0.0
+        cam_x = self.spin_cam_offset_x.value() if is_camera_active else 0.0
+        cam_y = self.spin_cam_offset_y.value() if is_camera_active else 0.0
 
-        # Локальные координаты точки на плате для МНК. Экран может показывать плату как со
-        # смещением камеры, так и уже с примененной калибровкой — снимаем ровно то, что на экране.
-        self.sync_geometry_context()
-        try:
-            self.manual_file_pts[point_idx] = self.geo_context.display_to_local(scene_x, -scene_y)
-        except ValueError as e:
-            QtWidgets.QMessageBox.warning(self, "Внимание", str(e))
-            return
+        # Снимаем чистую координату Gerber-файла относительно локального нуля платы
+        exact_file_x = scene_x
+        exact_file_y = -scene_y
+
+        # Сохраняем скрытые координаты для МНК
+        self.manual_file_pts[point_idx] = (exact_file_x, exact_file_y)
         self.redraw_calibration_markers()
         self.status_label.setText(f"Статус: Точка {point_idx + 1} зафиксирована в прицеле.")
         self.status_label.setStyleSheet("color: #0288d1;")
@@ -936,11 +885,23 @@ class LaserConverterApp(QtWidgets.QWidget):
             dialog.setMinimumWidth(340)
             dialog_layout = QtWidgets.QVBoxLayout(dialog)
 
+            cam_label = "\n"
+            if is_camera_active:
+                cam_label = (
+                    f"Режим: РАЗМЕТКА ПО КАМЕРЕ\n"
+                    f"Автопересчет под лазер:\n"
+                    f"   X_лазера = X_станка - ({cam_x:.4f})\n"
+                    f"   Y_лазера = Y_станка - ({cam_y:.4f})\n\n"
+                )
+            else:
+                cam_label = "Режим: РАЗМЕТКА ПО ЛУЧУ ЛАЗЕРА\n(Координаты станка напрямую без смещения)\n\n"
+
             info_text = (
                 f"Вы навели прицел на репер платы.\n"
                 f"Координата прицела на сетке (то, что видите):\n"
                 f"   X = {scene_x:.4f} мм\n"
                 f"   Y = {-scene_y:.4f} мм\n\n"
+                f"{cam_label}"
                 f"Задайте точные координаты станка ЧПУ (DRO):"
             )
             dialog_layout.addWidget(QtWidgets.QLabel(info_text))
@@ -964,14 +925,8 @@ class LaserConverterApp(QtWidgets.QWidget):
             spin_y.installEventFilter(self)
             grid.addWidget(spin_y, 1, 1)
 
-            # Подставляем координаты прицела как стартовое значение
             spin_x.setValue(scene_x)
             spin_y.setValue(-scene_y)
-
-            # Чекбокс автоматического добавления смещения камеры
-            cb_add_cam = QtWidgets.QCheckBox("Учитывать смещение камеры при вводе")
-            cb_add_cam.setChecked(is_camera_active)
-            dialog_layout.addWidget(cb_add_cam)
 
             button_box = QtWidgets.QDialogButtonBox(
                 QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel, dialog
@@ -984,19 +939,21 @@ class LaserConverterApp(QtWidgets.QWidget):
                 mach_x = spin_x.value()
                 mach_y = spin_y.value()
 
-                if cb_add_cam.isChecked():
-                    mach_x += cam_x
-                    mach_y += cam_y
+                # ЖЕЛЕЗНОЕ ВЫЧИТАНИЕ: Пересчитываем Камеру в Лазер.
+                # С минусом в крутилке превратится в сложение, идеально схлопнув слепую зону!
+                if is_camera_active:
+                    mach_x -= cam_x
+                    mach_y -= cam_y
 
-                self.manual_mach_pts[point_idx] = (mach_x, mach_y, cb_add_cam.isChecked())
+                self.manual_mach_pts[point_idx] = (mach_x, mach_y)
                 
-                cam_label = " (+Камера)" if cb_add_cam.isChecked() else ""
+                cam_label = " (+Камера)" if is_camera_active else ""
                 buttons[point_idx].setText(f"Т{point_idx + 1}: Сетка({scene_x:.4f}, {-scene_y:.4f}) -> Ст({mach_x:.4f}, {mach_y:.4f}){cam_label}")
                 buttons[point_idx].setStyleSheet("background-color: #c8e6c9; font-weight: bold;")
 
                 p1_3_ready = all(pt is not None for pt in self.manual_file_pts[:3]) and all(pt is not None for pt in self.manual_mach_pts[:3])
                 p4_enabled = self.cb_use_pt4.isChecked()
-                p4_ready = self.manual_file_pts[3] is not None and self.manual_mach_pts[3] is not None if p4_enabled else True
+                p4_ready = self.manual_file_pts is not None and self.manual_mach_pts is not None if p4_enabled else True
 
                 if p1_3_ready and p4_ready:
                     self.calculate_manual_affine_matrix()
@@ -1008,29 +965,35 @@ class LaserConverterApp(QtWidgets.QWidget):
         except Exception as e:
             print("\n" + "="*40 + " Сбой работы окна ввода " + "="*40)
             traceback.print_exc()
-            print("="*105 + "\n")
             QtWidgets.QMessageBox.critical(self, "Ошибка", f"Сбой работы окна ввода: {str(e)}")
 
-
     def redraw_calibration_markers(self):
-        """Рисует отметки реперов по их локальным координатам платы в текущей системе экрана.
-        После расчета матрицы отметки должны лечь точно на реперы — это визуальная проверка калибровки."""
+        """Рисует отметки реперов по их локальным координатам платы в текущей системе экрана."""
         for marker in self.manual_markers:
             try:
                 if marker is not None and marker.scene() is self.view.scene:
                     self.view.scene.removeItem(marker)
-            except RuntimeError:
-                pass  # объект уже удален вместе со scene.clear()
+            except:
+                pass
         self.manual_markers = [None, None, None, None]
         if not self.geo_context or not self.cb_enable_calib.isChecked():
             return
 
-        self.sync_geometry_context()
         colors = ["#ff1744", "#2979ff", "#00e676", "#e040fb"]
         for idx, pt in enumerate(self.manual_file_pts):
-            if pt is None:
-                continue
-            x, y = self.geo_context.local_to_display(*pt)
+            if pt is None: continue
+            
+            # ЖЕЛЕЗНОЕ ИСПРАВЛЕНИЕ: Распаковываем кортеж pt на отдельные float координаты X и Y!
+            pt_x, pt_y = pt
+            
+            # В калиброванном режиме прогоняем точки через матрицу МНК станка напрямую
+            if self.use_calibration and self.matrix_coeffs:
+                m11, m21, m12, m22, dx, dy = self.matrix_coeffs
+                x = m11 * pt_x + m21 * pt_y + dx
+                y = m12 * pt_x + m22 * pt_y + dy
+            else:
+                x, y = pt_x, pt_y
+                
             marker = QtWidgets.QGraphicsEllipseItem(x - 0.4, -y - 0.4, 0.8, 0.8)
             marker.setBrush(QtGui.QBrush(QtGui.QColor(colors[idx])))
             marker.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 0.15))
@@ -1048,7 +1011,6 @@ class LaserConverterApp(QtWidgets.QWidget):
             x_f = [float(self.manual_file_pts[idx][0]) for idx in valid_indices]
             y_f = [float(self.manual_file_pts[idx][1]) for idx in valid_indices]
 
-            # ИСПРАВЛЕНО: Полностью убрали прибавление cam_x и cam_y! 
             # Станочные координаты (DRO) берутся в чистом виде, как вы их ввели руками.
             X_m = [float(self.manual_mach_pts[idx][0]) for idx in valid_indices]
             Y_m = [float(self.manual_mach_pts[idx][1]) for idx in valid_indices]
@@ -1149,7 +1111,6 @@ class LaserConverterApp(QtWidgets.QWidget):
                 f"Статус: Геометрия готова.\n"
                 f"Размер из файла: {rx_max - rx_min:.2f} x {ry_max - ry_min:.2f} мм\n"
                 f"Размер маски платы (на станке): {min_x:.2f} ... {max_x:.2f} мм\n"
-                f"Габарит хода башки X (ЧПУ DRO): [ {min_x - ovr:.2f} ... {max_x + ovr:.2f} ] мм"
             ))
             self.status_label.setStyleSheet("color: #2e7d32; font-weight: bold;")
 
@@ -1220,7 +1181,7 @@ class LaserConverterApp(QtWidgets.QWidget):
             scan_ys = [min(ymin + (i * step) + (step / 2.0), ymax) for i in range(lines_count)]
             self.status_label.setText(f"Расчет пересечений: {lines_count} строк...")
             QtWidgets.QApplication.processEvents()
-            all_segments = scanline_intervals(burn_geom, scan_ys, xmin - 0.5, xmax + 0.5)
+            all_segments = scanline_intervals(burn_geom, scan_ys)
 
             for line_idx, (current_y, segments_coords) in enumerate(zip(scan_ys, all_segments)):
                 # Вычисляем истинные физические точки старта и финиша движения каретки станка (с вылетом overscan)
@@ -1295,9 +1256,15 @@ class LaserConverterApp(QtWidgets.QWidget):
             home_marker.setBrush(QtGui.QBrush(QtGui.QColor("red")))
             self.view.scene.addItem(home_marker)
 
+            machine_g0_start_x = xmin - overscan
+            machine_g0_end_x = xmax + overscan
+
             self.btn_save.setDisabled(False)
-            self.status_label.setText(f"Статус: Успешно! Траектория построена ({lines_count} строк).")
-            self.status_label.setStyleSheet("color: green;")
+            self.status_label.setText((
+                f"Статус: Успешно! Траектория построена ({lines_count} строк).\n"
+                f"Габарит хода башки X (ЧПУ DRO): [ {machine_g0_start_x:.2f} ... {machine_g0_end_x:.2f} ] мм"
+            ))
+            self.status_label.setStyleSheet("color: green; font-weight: bold;")
         except Exception as e:
             print("\n" + "="*40 + " Ошибка вычислений " + "="*40)
             traceback.print_exc()
